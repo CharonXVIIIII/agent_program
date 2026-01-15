@@ -318,7 +318,6 @@ int main(void) {
     } else {
         DEBUG("[+] Remote buffer allocated at: %p\n", remoteBuffer);
         DEBUG("[Memory Allocation - Success] Buffer size: %zu bytes with RW permissions\n", scLength);
-        sleep(10);
     }
 
 

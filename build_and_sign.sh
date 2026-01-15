@@ -15,12 +15,13 @@ if [ ! -f "$SOURCE_FILE" ]; then
     exit 1
 fi
 
-# Extrait le nom de base sans extension
+# Extrait le nom de base sans extension et le répertoire source
 BASENAME=$(basename "$SOURCE_FILE" .c)
+SOURCE_DIR=$(dirname "$SOURCE_FILE")
 
-# Définit les noms des fichiers de sortie
-OUTPUT_EXE="${BASENAME}.exe"
-SIGNED_EXE="${BASENAME}_signed.exe"
+# Définit les noms des fichiers de sortie dans le même répertoire que le source
+OUTPUT_EXE="${SOURCE_DIR}/${BASENAME}.exe"
+SIGNED_EXE="${SOURCE_DIR}/${BASENAME}_signed.exe"
 
 echo "Compilation de '$SOURCE_FILE'..."
 echo "Nettoyage des anciens fichiers..."
@@ -30,7 +31,6 @@ echo "Compilation avec mingw32..."
 
 # Detect if source file needs system_info.c (check if it includes system_info.h)
 ADDITIONAL_SOURCES=""
-SOURCE_DIR=$(dirname "$SOURCE_FILE")
 
 if grep -q "#include \"system_info.h\"" "$SOURCE_FILE" 2>/dev/null; then
     SYSTEM_INFO_C="${SOURCE_DIR}/system_info.c"

