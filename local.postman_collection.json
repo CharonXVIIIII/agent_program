@@ -1,0 +1,140 @@
+{
+	"info": {
+		"_postman_id": "a15d3b63-46ee-41fe-a469-1d6532e6cb60",
+		"name": "local",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+		"_exporter_id": "34069407",
+		"_collection_link": "https://time-manager-8918.postman.co/workspace/T-SEC~d90b46c8-ae28-4ce7-a879-50832da9c08c/collection/34069407-a15d3b63-46ee-41fe-a469-1d6532e6cb60?action=share&source=collection_link&creator=34069407"
+	},
+	"item": [
+		{
+			"name": "New Request",
+			"request": {
+				"method": "GET",
+				"header": []
+			},
+			"response": []
+		},
+		{
+			"name": "operator",
+			"request": {
+				"method": "POST",
+				"header": [],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"agent_id\": \"A1\",\n  \"command\": \"get_os\"\n}\n",
+					"options": {
+						"raw": {
+							"language": "json"
+						}
+					}
+				},
+				"url": {
+					"raw": "http://162.19.242.23:3000/operator/send",
+					"protocol": "http",
+					"host": [
+						"162",
+						"19",
+						"242",
+						"23"
+					],
+					"port": "3000",
+					"path": [
+						"operator",
+						"send"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "heartbeat",
+			"request": {
+				"method": "POST",
+				"header": [],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"agent_id\": \"A1\",\n  \"status\": \"online\"\n}\n",
+					"options": {
+						"raw": {
+							"language": "json"
+						}
+					}
+				},
+				"url": {
+					"raw": "http://localhost:3000/heartbeat",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "3000",
+					"path": [
+						"heartbeat"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "tasks",
+			"protocolProfileBehavior": {
+				"disableBodyPruning": true
+			},
+			"request": {
+				"method": "GET",
+				"header": [],
+				"body": {
+					"mode": "raw",
+					"raw": "",
+					"options": {
+						"raw": {
+							"language": "json"
+						}
+					}
+				},
+				"url": {
+					"raw": "http://localhost:3000/tasks/A1",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "3000",
+					"path": [
+						"tasks",
+						"A1"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "result",
+			"request": {
+				"method": "POST",
+				"header": [],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n    \"agent_id\": \"A1\",\n    \"output\": \"Ubuntu 22.04 (simulé)\"\n}\n",
+					"options": {
+						"raw": {
+							"language": "json"
+						}
+					}
+				},
+				"url": {
+					"raw": "http://localhost:3000/results/1",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "3000",
+					"path": [
+						"results",
+						"1"
+					]
+				}
+			},
+			"response": []
+		}
+	]
+}

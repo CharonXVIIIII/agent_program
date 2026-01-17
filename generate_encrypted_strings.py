@@ -12,7 +12,7 @@ def generate_c_array(name, encrypted_bytes):
     hex_values = ", ".join([f"0x{b:02x}" for b in encrypted_bytes])
     return f"unsigned char encrypted{name}[] = {{\n    {hex_values}\n}};"
 
-KEY = 0x35
+KEY = 0x1b
 
 apis = [
     "explorer.exe"
