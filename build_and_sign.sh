@@ -1,25 +1,17 @@
 #!/bin/bash
 
-# Script pour compiler et signer un exécutable Windows
-# Usage: ./build_and_sign.sh [fichier.c]
-# Si aucun fichier n'est spécifié, utilise first.c par défaut
+set -e
 
-set -e  # Arrête le script en cas d'erreur
-
-# Récupère le nom du fichier source (par défaut: first.c)
 SOURCE_FILE="${1:-first.c}"
 
-# Vérifie que le fichier source existe
 if [ ! -f "$SOURCE_FILE" ]; then
     echo "Erreur: Le fichier '$SOURCE_FILE' n'existe pas"
     exit 1
 fi
 
-# Extrait le nom de base sans extension et le répertoire source
 BASENAME=$(basename "$SOURCE_FILE" .c)
 SOURCE_DIR=$(dirname "$SOURCE_FILE")
 
-# Définit les noms des fichiers de sortie dans le même répertoire que le source
 OUTPUT_EXE="${SOURCE_DIR}/${BASENAME}.exe"
 SIGNED_EXE="${SOURCE_DIR}/${BASENAME}_signed.exe"
 
@@ -29,7 +21,6 @@ rm -f "$OUTPUT_EXE" "$SIGNED_EXE"
 
 echo "Compilation avec mingw32..."
 
-# Detect if source file needs system_info.c (check if it includes system_info.h)
 ADDITIONAL_SOURCES=""
 
 if grep -q "#include \"system_info.h\"" "$SOURCE_FILE" 2>/dev/null; then
