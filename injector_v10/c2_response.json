@@ -1,0 +1,6 @@
+{
+    "status":"online",
+    "task":"XXXX", // Inject OR Sleep OR Destroy
+    "payload_name":"keylogger", // Rempli uniquement si task = Inject
+    "payload":"90903D3F" // Rempli uniquement si task = Inject
+}

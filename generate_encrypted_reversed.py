@@ -49,7 +49,7 @@ def generate_c_array(name, text, key_bytes):
 
 # Définition des clés plus complexes (4 octets)
 # Vous pouvez changer ces valeurs pour n'importe quelle suite d'octets
-API_KEY  = [0xDE, 0xAD, 0xBE, 0xEF] 
+API_KEY  = [0x35] 
 PROCESS_KEY  = [0x12, 0x34, 0x56, 0x78]
 C2_KEY   = [0x9A, 0xF2, 0x18, 0x4C]
 

@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(chmod:*)",
+      "Bash(gcc:*)",
+      "Bash(wsl bash -c \"cd /mnt/c/Users/Odessa/Epitech/T-VIR/agent_program/keylogger_payload && ./compile.sh\")",
+      "Bash(wsl bash -c \"cd /mnt/c/Users/Odessa/Epitech/T-VIR/agent_program/keylogger_payload && dos2unix *.sh 2>/dev/null || sed -i ''s/\\\\r$//'' *.sh && chmod +x *.sh\")",
+      "Bash(wsl ls:*)",
+      "Bash(wsl bash:*)"
+    ]
+  }
+}

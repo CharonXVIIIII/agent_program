@@ -1,0 +1,15 @@
+# Exécutables
+*.exe
+
+# Fichiers de payload
+*_payload.txt
+*_hex.txt
+*.bin
+
+# Fichiers temporaires
+*.tmp
+*.temp
+*.log
+
+# Fichiers de test
+test_*
