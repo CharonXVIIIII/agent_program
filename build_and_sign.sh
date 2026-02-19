@@ -31,7 +31,13 @@ if grep -q "#include \"system_info.h\"" "$SOURCE_FILE" 2>/dev/null; then
     fi
 fi
 
-x86_64-w64-mingw32-gcc "$SOURCE_FILE" $ADDITIONAL_SOURCES -o "$OUTPUT_EXE" -s -liphlpapi -lws2_32 -lrpcrt4
+EXTRA_LIBS=""
+if grep -q "BitBlt\|GetDC\|CreateCompatibleDC\|GetDIBits" "$SOURCE_FILE" 2>/dev/null; then
+    echo "Détection de GDI32 - ajout de -lgdi32 -luser32"
+    EXTRA_LIBS="-lgdi32 -luser32"
+fi
+
+x86_64-w64-mingw32-gcc "$SOURCE_FILE" $ADDITIONAL_SOURCES -o "$OUTPUT_EXE" -s -liphlpapi -lws2_32 -lrpcrt4 $EXTRA_LIBS
 
 echo "Signature du binaire..."
 osslsigncode sign -pkcs12 MalwrCert.pfx -n "Mon Malware Epitech" -i http://www.epitech.eu -t http://timestamp.digicert.com -in "$OUTPUT_EXE" -out "$SIGNED_EXE"
