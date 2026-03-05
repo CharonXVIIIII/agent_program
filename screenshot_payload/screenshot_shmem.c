@@ -84,8 +84,8 @@ static int CaptureScreenToBMP(const char* filepath) {
     DWORD w;
     WriteFile(hFile, &bf, sizeof(bf), &w, NULL);
     WriteFile(hFile, &bi, sizeof(bi), &w, NULL);
-    // GetDIBits = bottom-up → écrire de bas en haut pour obtenir top-down
-    for (int y = screenHeight - 1; y >= 0; y--)
+    // GetDIBits avec biHeight>0 retourne bottom-up, BMP attend aussi bottom-up → écrire tel quel
+    for (int y = 0; y < screenHeight; y++)
         WriteFile(hFile, pixels + (DWORD)y * rowSize, rowSize, &w, NULL);
 
     CloseHandle(hFile);

