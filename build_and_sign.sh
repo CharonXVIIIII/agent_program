@@ -37,11 +37,11 @@ if grep -q "BitBlt\|GetDC\|CreateCompatibleDC\|GetDIBits" "$SOURCE_FILE" 2>/dev/
     EXTRA_LIBS="-lgdi32 -luser32"
 fi
 
-#SUBSYSTEM_FLAG=""
-#if grep -q "SUBSYSTEM:windows" "$SOURCE_FILE" 2>/dev/null; then
-#    echo "Détection de SUBSYSTEM:windows - ajout de -mwindows"
-#    SUBSYSTEM_FLAG="-mwindows"
-#fi
+SUBSYSTEM_FLAG=""
+if grep -q "SUBSYSTEM:windows" "$SOURCE_FILE" 2>/dev/null; then
+    echo "Détection de SUBSYSTEM:windows - ajout de -mwindows"
+    SUBSYSTEM_FLAG="-mwindows"
+fi
 
 RESOURCE_OBJ=""
 RC_FILE="${SOURCE_DIR}/resource.rc"
@@ -58,7 +58,8 @@ if grep -q "winhttp.h\|WinHttpOpen" "$SOURCE_FILE" 2>/dev/null; then
     WINHTTP_FLAG="-lwinhttp"
 fi
 
-x86_64-w64-mingw32-gcc "$SOURCE_FILE" $ADDITIONAL_SOURCES $RESOURCE_OBJ -o "$OUTPUT_EXE" -s -liphlpapi -lws2_32 -lrpcrt4 $EXTRA_LIBS $SUBSYSTEM_FLAG $WINHTTP_FLAG
+
+x86_64-w64-mingw32-gcc "$SOURCE_FILE" $ADDITIONAL_SOURCES $RESOURCE_OBJ -o "$OUTPUT_EXE" -s -liphlpapi -lws2_32 -lrpcrt4 $EXTRA_LIBS $WINHTTP_FLAG
 
 echo "Signature du binaire..."
 osslsigncode sign -pkcs12 MalwrCert.pfx -n "Mon Malware Epitech" -i http://www.epitech.eu -t http://timestamp.digicert.com -in "$OUTPUT_EXE" -out "$SIGNED_EXE"

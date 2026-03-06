@@ -14,7 +14,7 @@
 // ============================================================================
 #define SHARED_MEMORY_NAME  "Local\\ScreenshotSharedMem"
 #define SCREENSHOT_PATH     "C:\\Users\\Public\\screenshot.bmp"
-#define ACK_TIMEOUT_MS      30000   // 30 sec max pour que l'agent lise
+#define ACK_TIMEOUT_MS      30000
 
 // ============================================================================
 // STRUCTURE DE LA MÉMOIRE PARTAGÉE

